@@ -40,14 +40,14 @@ try:
     # python 2
     from Queue import Queue
     import cookielib as cookiejar
-    from urlparse import urlparse,unquote
+    from urlparse import urlparse,unquote,parse_qs
     from itertools import izip_longest as zip_longest
     from StringIO import StringIO
 except ImportError:
     # python 3
     from queue import Queue
     import http.cookiejar as cookiejar
-    from urllib.parse import urlparse, unquote
+    from urllib.parse import urlparse, unquote,parse_qs
     from itertools import zip_longest
     from io import StringIO
     
@@ -84,12 +84,6 @@ OPEN_EXISTING = 0x3
 FILE_BEGIN = 0x0
 
 
-# lib mods
-# bypass the hardcoded "Netscape HTTP Cookie File" check
-if hasattr(cookiejar.MozillaCookieJar.magic_re, "search"):
-    cookiejar.MozillaCookieJar.magic_re = re.compile(r'.*') 
-else:
-    cookiejar.MozillaCookieJar.magic_re = r'.*'  
 # configure logging
 logFormatter = logging.Formatter("%(asctime)s | %(message)s", datefmt='%H:%M:%S')
 rootLogger = logging.getLogger('ws')
@@ -109,17 +103,18 @@ log_exception = rootLogger.exception
 
 # filepath constants
 GAME_STORAGE_DIR = r'.'
-COOKIES_FILENAME = r'gog-cookies.dat'
-NETSCAPE_COOKIES_FILENAME = r'cookies.txt'
-NETSCAPE_COOKIES_TMP_FILENAME = r'cookies.txt.tmp'
+TOKEN_FILENAME = r'gog-token.dat'
+'''
 MANIFEST_FILENAME = r'gog-manifest.dat'
 RESUME_MANIFEST_FILENAME = r'gog-resume-manifest.dat'
+'''
+MANIFEST_FILENAME = r'gog-manifest-embed.dat'
+RESUME_MANIFEST_FILENAME = r'gog-resume-manifest-embed.dat'
+
 CONFIG_FILENAME = r'gog-config.dat'
 SERIAL_FILENAME = r'!serial.txt'
 INFO_FILENAME = r'!info.txt'
 
-# global web utilities
-global_cookies = cookiejar.LWPCookieJar(COOKIES_FILENAME)
 
 #github API URLs
 REPO_HOME_URL = "https://api.github.com/repos/kalanyr/gogrepo" 
@@ -130,6 +125,13 @@ GOG_HOME_URL = r'https://www.gog.com'
 GOG_ACCOUNT_URL = r'https://www.gog.com/account'
 GOG_LOGIN_URL = r'https://login.gog.com/login_check'
 
+#GOG Galaxy URLs
+GOG_AUTH_URL = r'https://auth.gog.com/auth'
+GOG_GALAXY_REDIRECT_URL = r'https://embed.gog.com/on_login_success'
+GOG_CLIENT_ID = '46899977096215655'
+GOG_SECRET = '9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9'
+GOG_TOKEN_URL = r'https://auth.gog.com/token'
+GOG_EMBED_URL = r'https://embed.gog.com'
 # GOG Constants
 GOG_MEDIA_TYPE_GAME  = '1'
 GOG_MEDIA_TYPE_MOVIE = '2'
@@ -187,7 +189,10 @@ if not (sysOS in VALID_OS_TYPES):
     sysOS = 'linux'
 DEFAULT_OS_LIST = [sysOS]
 sysLang,_ = locale.getdefaultlocale()
-sysLang = sysLang[:2]
+if sysLang is not None:
+    sysLang = sysLang[:2]
+else:
+    sysLang = 'en'
 if not (sysLang in VALID_LANG_TYPES):
     sysLang = 'en'
 DEFAULT_LANG_LIST = [sysLang]
@@ -206,6 +211,7 @@ DOWNLOADING_DIR_NAME = '!downloading'
 ORPHAN_DIR_EXCLUDE_LIST = [ORPHAN_DIR_NAME,DOWNLOADING_DIR_NAME, '!misc']
 ORPHAN_FILE_EXCLUDE_LIST = [INFO_FILENAME, SERIAL_FILENAME]
 RESUME_SAVE_THRESHOLD = 50
+token_lock = threading.RLock()
 
 #temporary request wrapper while testing sessions module in context of update. Will replace request when complete
 def request(session,url,args=None,byte_range=None,retries=HTTP_RETRY_COUNT,delay=None,stream=False,data=None):
@@ -214,6 +220,29 @@ def request(session,url,args=None,byte_range=None,retries=HTTP_RETRY_COUNT,delay
     _retry = False
     if delay is not None:
         time.sleep(delay)
+    
+    with token_lock:
+        time_now = time.time()
+        try:
+            if time_now + 60 > session.token['expiry']:
+                info('refreshing token')
+                try:
+                    token_response = session.get(GOG_TOKEN_URL,params={'client_id':'46899977096215655' ,'client_secret':'9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9', 'grant_type': 'refresh_token','refresh_token': session.token['refresh_token']})   
+                    token_response.raise_for_status()    
+                except Exception as e:
+                    error(e)
+                    error('Could not renew token, Please login again.')
+                    sys.exit(1)
+                token_json = token_response.json()
+                for item in token_json:
+                    session.token[item] = token_json[item]
+                session.token['expiry'] = time_now + token_json['expires_in']
+                save_token(session.token)           
+                session.headers['Authorization'] = "Bearer " + session.token['access_token']
+                info('refreshed token')            
+        except AttributeError:
+            #Not a Token based session
+            pass
 
     try:
         if data is not None:        
@@ -289,36 +318,6 @@ class ConditionalWriter(object):
                     tmp.seek(0)
                     shutil.copyfileobj(tmp, overwrite)
 
-def load_cookies():
-    # try to load as default lwp format
-    try:
-        global_cookies.load()
-        return
-    except IOError:
-        pass
-
-    # try to import as mozilla 'cookies.txt' format
-    try:
-        with codecs.open(NETSCAPE_COOKIES_FILENAME,"rU",'utf-8') as f1:
-            with codecs.open(NETSCAPE_COOKIES_TMP_FILENAME,"w",'utf-8') as f2:
-                for line in f1:
-                    line = line.replace(u"#HttpOnly_",u"")
-                    line=line.strip()
-                    if not (line.startswith(u"#")):
-                        if (u"gog.com" in line): 
-                            f2.write(line+u"\n")
-        tmp_jar = cookiejar.MozillaCookieJar(NETSCAPE_COOKIES_TMP_FILENAME)
-        tmp_jar.load()
-        for c in tmp_jar:
-            global_cookies.set_cookie(c)
-        global_cookies.save()
-        return
-    except IOError:
-        pass
-
-    error('failed to load cookies, did you login first?')
-    raise SystemExit(1)
-
 
 def load_manifest(filepath=MANIFEST_FILENAME):
     info('loading local manifest...')
@@ -357,10 +356,31 @@ def load_manifest(filepath=MANIFEST_FILENAME):
             db = eval(ad)
             if (mungeDetected):
                 save_manifest(db)
-        return eval(ad)
+        return db
     except IOError:
         return []
 
+def save_token(token):
+    info('saving token...')
+    try:
+        with codecs.open(TOKEN_FILENAME, 'w', 'utf-8') as w:
+            pprint.pprint(token, width=123, stream=w)
+        info('saved token')
+    except KeyboardInterrupt:
+        with codecs.open(TOKEN_FILENAME, 'w', 'utf-8') as w:
+            pprint.pprint(token, width=123, stream=w)
+        info('saved token')            
+        raise
+
+def load_token(filepath=TOKEN_FILENAME):
+    info('loading token...')
+    try:
+        with codecs.open(filepath, 'rU', 'utf-8') as r:
+            ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
+        return eval(ad)
+    except IOError:
+        return []
+        
 
 def save_manifest(items):
     info('saving manifest...')
@@ -681,6 +701,38 @@ def fetch_file_info(d, fetch_md5,updateSession):
             except xml.etree.ElementTree.ParseError:
                 warn('xml parsing error occurred trying to get md5 data for {}'.format(d.name))
 
+def filter_simpleGalaxyDownloads(out_list,downloads_list,os_list,updateSession):
+    """filters any downloads information against matching os, translates
+    them, and extends them into out_list
+    """
+    filtered_downloads = []
+    for download in downloads_list:
+        if download['os'] not in os_list:        
+            continue
+        # passed the filter, create the entry
+        d = AttrDict()
+        specialKeys = ['os_type','href','md5','size','prev_verified','old_name','name','path','os','lang','type']
+        for key in download:
+            if key not in specialKeys:
+                d[key] = download[key]
+        d.os_type=download['os']
+        d.href=GOG_EMBED_URL + download['path']
+        d.type = "simpleGalaxy"
+        d.lang = 'Any'
+        d.md5=None
+        d.name=None
+        d.size=None
+        d.prev_verified=False
+        d.old_name=None
+        try:
+            fetch_file_info(d, False,updateSession)
+        except requests.HTTPError:
+            warn("failed to fetch %s" % d.href)
+        except Exception:
+            log_exception('')
+            warn("failed to fetch %s because of non-HTTP Error" % d.href)                            
+        filtered_downloads.append(d)
+    out_list.extend(filtered_downloads)
 
 def filter_downloads(out_list, downloads_list, lang_list, os_list,updateSession):
     """filters any downloads information against matching lang and os, translates
@@ -701,17 +753,36 @@ def filter_downloads(out_list, downloads_list, lang_list, os_list,updateSession)
                 if os_type in os_list:
                     for download in downloads_dict[lang][os_type]:
                         # passed the filter, create the entry
-                        d = AttrDict(desc=download['name'],
-                                     os_type=os_type,
-                                     lang=lang,
-                                     version=download['version'],
-                                     href=GOG_HOME_URL + download['manualUrl'],
-                                     md5=None,
-                                     name=None,
-                                     size=None,
-                                     prev_verified=False,
-                                     old_name=None
-                                     )
+                        d = AttrDict()
+                        specialKeys = ['desc','os_type','lang','href','md5','size','prev_verified','old_name','name','manualUrl','type']
+                        for key in download:
+                            if key not in specialKeys:
+                                d[key] = download[key]
+                        d.desc=download['name']
+                        d.os_type=os_type
+                        d.lang=lang
+                        d.href=GOG_EMBED_URL + download['manualUrl']
+                        d.type = "installer"
+                        try:
+                            typetxt=download['manualUrl'].split("/")[-1]
+                            if "patch" in typetxt:
+                                d.type = "patch"
+                            elif "galaxy" in typetxt:
+                                d.type = "galaxy"
+                            elif "video" in typetxt:
+                                d.type = "video"
+                            elif "installer" not in typetxt:
+                                warn("could not detect installer type in " + download['manualUrl'])
+                                print(typetxt)
+                        except Exception as e:
+                            print(e)
+                            warn("could not detect installer type in " + download['manualUrl'])
+                            pass
+                        d.md5=None
+                        d.name=None
+                        d.size=None
+                        d.prev_verified=False
+                        d.old_name=None
                         try:
                             fetch_file_info(d, True,updateSession)
                         except requests.HTTPError:
@@ -723,24 +794,27 @@ def filter_downloads(out_list, downloads_list, lang_list, os_list,updateSession)
 
     out_list.extend(filtered_downloads)
 
-
 def filter_extras(out_list, extras_list,updateSession):
     """filters and translates extras information and adds them into out_list
     """
     filtered_extras = []
 
     for extra in extras_list:
-        d = AttrDict(desc=extra['name'],
-                     os_type='extra',
-                     lang='',
-                     version=None,
-                     href=GOG_HOME_URL + extra['manualUrl'],
-                     md5=None,
-                     name=None,
-                     size=None,
-                     prev_verified=False,
-                     old_name = None
-                     )
+        d = AttrDict()
+        specialKeys = ['desc','os_type','lang','href','md5','size','prev_verified','old_name','name','manualUrl']
+        for key in extra:
+            if key not in specialKeys:
+                d[key] = extra[key]
+        d.desc=extra['name']
+        d.os_type='any'
+        d.lang='Any'
+        d.version=None
+        d.href=GOG_EMBED_URL + extra['manualUrl']
+        d.md5=None
+        d.name=None
+        d.size=None
+        d.prev_verified=False
+        d.old_name = None
         try:
             fetch_file_info(d, False,updateSession)
         except requests.HTTPError:
@@ -753,17 +827,43 @@ def filter_extras(out_list, extras_list,updateSession):
     out_list.extend(filtered_extras)
 
 
-def filter_dlcs(item, dlc_list, lang_list, os_list,updateSession):
+def filter_dlcs(out_list, dlc_list, lang_list, os_list,updateSession,isMovie,isGame):
     """filters any downloads/extras information against matching lang and os, translates
     them, and adds them to the item downloads/extras
 
     dlcs can contain dlcs in a recursive fashion, and oddly GOG does do this for some titles.
     """
+    
+    filtered_dlcs = []
+    
     for dlc_dict in dlc_list:
-        filter_downloads(item.downloads, dlc_dict['downloads'], lang_list, os_list,updateSession)
-        filter_downloads(item.galaxyDownloads, dlc_dict['galaxyDownloads'], lang_list, os_list,updateSession)                        
-        filter_extras(item.extras, dlc_dict['extras'],updateSession)
-        filter_dlcs(item, dlc_dict['dlcs'], lang_list, os_list,updateSession)  # recursive
+        d = AttrDict()
+        d.changelog = ''
+        d.changelogT = ''
+        d.movies = []
+        d.galaxyMovies = []
+        d.downloads = []
+        d.galaxyDownloads = []
+        d.simpleGalaxyDownloads = []
+        d.extras = []
+        d.dlcs = []
+        d.type = 'dlc'
+        specialKeys = ['downloads','galaxyDownloads','extras','dlcs','changelogT','simpleGalaxyDownloads','simpleGalaxyInstallers','movies','galaxyMovies','type']
+        for key in dlc_dict:
+            if key not in specialKeys:
+                d[key] = dlc_dict[key]
+        if isGame:        
+            filter_downloads(d.downloads, dlc_dict['downloads'], lang_list, os_list,updateSession)
+            filter_downloads(d.galaxyDownloads, dlc_dict['galaxyDownloads'], lang_list, os_list,updateSession) 
+        elif isMovie:
+            filter_downloads(d.movies, dlc_dict['downloads'],lang_list, os_list, updateSession)
+            filter_downloads(d.galaxyMovies, dlc_dict['galaxyDownloads'], lang_list, os_list, updateSession) 
+        filter_simpleGalaxyDownloads(d.simpleGalaxyDownloads,dlc_dict['simpleGalaxyInstallers'],os_list,updateSession)                
+        filter_extras(d.extras, dlc_dict['extras'],updateSession)
+        filter_dlcs(d.dlcs, dlc_dict['dlcs'], lang_list, os_list,updateSession,isMovie,isGame)  # recursive
+        filtered_dlcs.append(d)
+        
+    out_list.extend(filtered_dlcs)
         
 def deDuplicateList(duplicatedList,existingItems):   
     deDuplicatedList = []
@@ -845,7 +945,7 @@ def process_argv(argv):
     sp1 = p1.add_subparsers(help='command', dest='command', title='commands')
     sp1.required = True
 
-    g1 = sp1.add_parser('login', help='Login to GOG and save a local copy of your authenticated cookie')
+    g1 = sp1.add_parser('login', help='Login to GOG Galaxy API and save a local copy of your authenticated token')
     g1.add_argument('username', action='store', help='GOG username/email', nargs='?', default=None)
     g1.add_argument('password', action='store', help='GOG password', nargs='?', default=None)
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
@@ -1015,7 +1115,7 @@ def process_argv(argv):
 # Commands
 # --------
 def cmd_login(user, passwd):
-    """Attempts to log into GOG and saves the resulting cookiejar to disk.
+    """Attempts to log into GOG Galaxy API and saves the resulting Token to disk.
     """
     login_data = {'user': user,
                   'passwd': passwd,
@@ -1024,92 +1124,98 @@ def cmd_login(user, passwd):
                   'two_step_url': None,
                   'two_step_token': None,
                   'two_step_security_code': None,
-                  'login_success': False,
+                  'login_success': None
                   }
-
-    global_cookies.clear()  # reset cookiejar
-
     # prompt for login/password if needed
     if login_data['user'] is None:
         login_data['user'] = input("Username: ")
     if login_data['passwd'] is None:
         login_data['passwd'] = getpass.getpass()
+        
+    token_data = {'user': login_data['user'],
+                  'passwd': login_data['passwd'],
+                  'auth_url': None,
+                  'login_token': None,
+                  'two_step_url': None,
+                  'two_step_token': None,
+                  'two_step_security_code': None,
+                  'login_code':None
+                  }
+        
 
-    info("attempting gog login as '{}' ...".format(login_data['user']))
     
     loginSession = makeGOGSession(True)
-
-    # fetch the auth url
     
-    page_response = request(loginSession,GOG_HOME_URL)    
-    etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
-    for elm in etree.findall('.//script'):
-        if elm.text is not None and 'GalaxyAccounts' in elm.text:
-            authCandidates = elm.text.split("'")
-            for authCandidate in authCandidates:
-                if 'auth' in authCandidate:
-                    testAuth = urlparse(authCandidate)
-                    if testAuth.scheme == "https":
-                        login_data['auth_url'] = authCandidate
-                        break
-            if login_data['auth_url']:
-                break
-                
-    if not login_data['auth_url']:
-        error("cannot find auth url, please report to the maintainer")
-        exit()
-
-    page_response = request(loginSession,login_data['auth_url'])          
+    # fetch the auth url
+    info("attempting Galaxy login as '{}' ...".format(token_data['user']))
+    
+    page_response = request(loginSession,GOG_AUTH_URL,args={'client_id':'46899977096215655' ,'redirect_uri': 'https://embed.gog.com/on_login_success?origin=client','response_type': 'code','layout':'client2'})          
     # fetch the login token
     etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
     # Bail if we find a request for a reCAPTCHA
     if len(etree.findall('.//div[@class="g-recaptcha form__recaptcha"]')) > 0:
-        error("cannot continue, gog is asking for a reCAPTCHA :(  try again in a few minutes.")
-        return
+        error("gog is asking for a reCAPTCHA :(  Please use a browser to sign in at the below url and then copy & paste the full URL")
+        info(page_response.url)
+        inputUrl  = input("Signed In URL: ")
+        try:
+            parsed = urlparse(inputUrl)    
+            query_parsed = parse_qs(parsed.query)
+            token_data['login_code'] = query_parsed['code']
+        except Exception:
+            error("Could not parse entered URL. Try again later or report to the maintainer")
+            return 
     for elm in etree.findall('.//input'):
         if elm.attrib['id'] == 'login__token':
-            login_data['login_token'] = elm.attrib['value']
+            token_data['login_token'] = elm.attrib['value']
             break
+            
+    if not token_data['login_code']:        
 
-    # perform login and capture two-step token if required
-    page_response = request(loginSession,GOG_LOGIN_URL, data={'login[username]': login_data['user'],
-                                               'login[password]': login_data['passwd'],
-                                               'login[login]': '',
-                                               'login[_token]': login_data['login_token']}) 
-    etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
-    if 'two_step' in page_response.url:
-        login_data['two_step_url'] = page_response.url
-        for elm in etree.findall('.//input'):
-            if elm.attrib['id'] == 'second_step_authentication__token':
-                login_data['two_step_token'] = elm.attrib['value']
-                break
-    elif 'on_login_success' in page_response.url:
-        login_data['login_success'] = True
+        # perform login and capture two-step token if required
+        page_response = request(loginSession,GOG_LOGIN_URL, data={'login[username]': token_data['user'],
+                                                   'login[password]': token_data['passwd'],
+                                                   'login[login]': '',
+                                                   'login[_token]': token_data['login_token']}) 
+        etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
+        if 'two_step' in page_response.url:
+            token_data['two_step_url'] = page_response.url
+            for elm in etree.findall('.//input'):
+                if elm.attrib['id'] == 'second_step_authentication__token':
+                    token_data['two_step_token'] = elm.attrib['value']
+                    break
+        elif 'on_login_success' in page_response.url:
+            parsed = urlparse(page_response.url)    
+            query_parsed = parse_qs(parsed.query)
+            token_data['login_code'] = query_parsed['code']
+            
 
-    # perform two-step if needed
-    if login_data['two_step_url'] is not None:
-        login_data['two_step_security_code'] = input("enter two-step security code: ")
+        # perform two-step if needed
+        if token_data['two_step_url'] is not None:
+            token_data['two_step_security_code'] = input("enter two-step security code: ")
 
-        # Send the security code back to GOG
-        page_response= request(loginSession,login_data['two_step_url'], 
-                     data={'second_step_authentication[token][letter_1]': login_data['two_step_security_code'][0],
-                           'second_step_authentication[token][letter_2]': login_data['two_step_security_code'][1],
-                           'second_step_authentication[token][letter_3]': login_data['two_step_security_code'][2],
-                           'second_step_authentication[token][letter_4]': login_data['two_step_security_code'][3],
-                           'second_step_authentication[send]': "",
-                           'second_step_authentication[_token]': login_data['two_step_token']})
-        if 'on_login_success' in page_response.url:
-            login_data['login_success'] = True
-
-    # save cookies on success
-    if login_data['login_success']:
-        info('login successful!')
-        for c in loginSession.cookies:
-            global_cookies.set_cookie(c)
-        global_cookies.save()
+            # Send the security code back to GOG
+            page_response= request(loginSession,token_data['two_step_url'], 
+                         data={'second_step_authentication[token][letter_1]': token_data['two_step_security_code'][0],
+                               'second_step_authentication[token][letter_2]': token_data['two_step_security_code'][1],
+                               'second_step_authentication[token][letter_3]': token_data['two_step_security_code'][2],
+                               'second_step_authentication[token][letter_4]': token_data['two_step_security_code'][3],
+                               'second_step_authentication[send]': "",
+                               'second_step_authentication[_token]': token_data['two_step_token']})
+            if 'on_login_success' in page_response.url:
+                parsed = urlparse(page_response.url)    
+                query_parsed = parse_qs(parsed.query)
+                token_data['login_code'] = query_parsed['code']
+                        
+    if token_data['login_code']:
+        token_start = time.time()
+        token_response = request(loginSession,GOG_TOKEN_URL,args={'client_id':'46899977096215655' ,'client_secret':'9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9', 'grant_type': 'authorization_code','code': token_data['login_code'],'redirect_uri': 'https://embed.gog.com/on_login_success?origin=client'})    
+        token_json = token_response.json()
+        token_json['expiry'] = token_start + token_json['expires_in']
+        save_token(token_json)           
     else:
-        error('login failed, verify your username/password and try again.')
-
+        error('Galaxy login failed, verify your username/password and try again.')
+    
+    
 def makeGitHubSession(authenticatedSession=False):
     gitSession = requests.Session()
     gitSession.headers={'User-Agent':USER_AGENT,'Accept':'application/vnd.github.v3+json'}
@@ -1117,23 +1223,30 @@ def makeGitHubSession(authenticatedSession=False):
         
 def makeGOGSession(loginSession=False):
     gogSession = requests.Session()
-    gogSession.headers={'User-Agent':USER_AGENT}
     if not loginSession:
-        load_cookies()
-        gogSession.cookies.update(global_cookies)
+        gogSession.token = load_token()
+        try:
+            gogSession.headers={'User-Agent':USER_AGENT,'Authorization':'Bearer ' + gogSession.token['access_token']}    
+        except KeyError: 
+            error('failed to find token (did you log in?)')
+            sys.exit(1)
     return gogSession
 
 def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,skipHidden,installers,resumemode,strict):
 
     
-    media_type = GOG_MEDIA_TYPE_GAME
     items = []
     known_ids = []
     known_titles = []
     i = 0
     
+    '''
     api_url  = GOG_ACCOUNT_URL
     api_url += "/getFilteredProducts"
+    '''
+    
+    api_url = GOG_EMBED_URL
+    api_url += "/account/getFilteredProducts"
  
 
     gamesdb = load_manifest()
@@ -1203,9 +1316,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                 info('fetching game product data (page %d)...' % i)
             else:
                 info('fetching game product data (page %d / %d)...' % (i, json_data['totalPages']))
-            data_response = request(updateSession,api_url,args={'mediaType': media_type,'sortBy': 'title','page': str(i)})    
-#            with open("text.html","w+",encoding='utf-8') as f:
-#                f.write(data_response.text)
+            data_response = request(updateSession,api_url,args={'mediaType':GOG_MEDIA_TYPE_GAME,'sortBy': 'title','page': str(i)})    
             try:
                 json_data = data_response.json()
             except ValueError:
@@ -1217,16 +1328,20 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                 # skip games marked as hidden
                 if skipHidden and (item_json_data.get('isHidden', False) is True):
                     continue
+                    
+                specialKeys = ['slug','title','category','image','url','updates','long_title','genre','image_url','store_url','has_updates','old_title','changelogT']    
 
                 item = AttrDict()
-                item.id = item_json_data['id']
+                item.changelog = ''
+                for key in item_json_data: 
+                    if key not in specialKeys:
+                        item[key] = item_json_data[key]
+                item.changelogT = ''
                 item.title = item_json_data['slug']
                 item.long_title = item_json_data['title']
                 item.genre = item_json_data['category']
                 item.image_url = item_json_data['image']
                 item.store_url = item_json_data['url']
-                item.media_type = media_type
-                item.rating = item_json_data['rating']
                 item.has_updates = bool(item_json_data['updates'])
                 item.old_title = None
                 
@@ -1257,14 +1372,75 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                 
             if i >= json_data['totalPages']:
                 done = True
-                    
-     
+                
+        # Fetch shelf data
+        i = 0
+        done = False
+        while not done:
+            i += 1  # starts at page 1
+            if i == 1:
+                info('fetching movie product data (page %d)...' % i)
+            else:
+                info('fetching movie product data (page %d / %d)...' % (i, json_data['totalPages']))
+            data_response = request(updateSession,api_url,args={'mediaType': GOG_MEDIA_TYPE_MOVIE,'sortBy': 'title','page': str(i)})    
+            try:
+                json_data = data_response.json()
+            except ValueError:
+                error('failed to load product data (are you still logged in?)')
+                raise SystemExit(1)
 
+            # Parse out the interesting fields and add to items dict
+            for item_json_data in json_data['products']:
+                # skip games marked as hidden
+                if skipHidden and (item_json_data.get('isHidden', False) is True):
+                    continue
+                    
+                specialKeys = ['slug','title','category','image','url','updates','long_title','genre','image_url','store_url','has_updates','old_title','changelogT']    
+
+                item = AttrDict()
+                item.changelog = ''
+                for key in item_json_data: 
+                    if key not in specialKeys:
+                        item[key] = item_json_data[key]
+                item.changelogT = ''
+                item.title = item_json_data['slug']
+                item.long_title = item_json_data['title']
+                item.genre = item_json_data['category']
+                item.image_url = item_json_data['image']
+                item.store_url = item_json_data['url']
+                item.has_updates = bool(item_json_data['updates'])
+                item.old_title = None
+                
+                
+                if not done:
+                    if item.title not in skipids and str(item.id) not in skipids: 
+                        if ids: 
+                            if (item.title  in ids or str(item.id) in ids):  # support by game title or gog id
+                                info('scanning found "{}" in product data!'.format(item.title))
+                                try:
+                                    ids.remove(item.title)
+                                except ValueError:
+                                    try:
+                                        ids.remove(str(item.id))
+                                    except ValueError:
+                                        warn("Somehow we have matched an unspecified ID. Huh ?")
+                                if not ids:
+                                    done = True
+                            else:
+                                continue
+                        if (not partial) or (updateonly and item.has_updates) or (skipknown and item.id not in known_ids):  
+                             items.append(item)
+                    else:        
+                        info('skipping "{}" found in product data!'.format(item.title))
+                    
+                
+            if i >= json_data['totalPages']:
+                done = True
         if not idsOriginal and not updateonly and not skipknown:
             validIDs = [item.id for item in items]
             invalidItems = [itemID for itemID in known_ids if itemID not in validIDs and str(itemID) not in skipids]
             if len(invalidItems) != 0: 
-                warn('old games in manifest. Removing ...')
+                warn('old items in manifest. Removing ...')
                 for item in invalidItems:
                     warn('Removing id "{}" from manifest'.format(item))
                     item_idx = item_checkdb(item, gamesdb)
@@ -1277,7 +1453,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
             invalids = invalidIDs + invalidTitles
             if invalids:
                 formattedInvalids =  ', '.join(map(str, invalids))        
-                warn(' game id(s) from {%s} were in your manifest but not your product data ' % formattedInvalids)
+                warn('id(s) from {%s} were in your manifest but not your product data ' % formattedInvalids)
                 titlesToIDs = [(game.id,game.title) for game in gamesdb if game.title in invalidTitles]
                 for invalidID in invalidIDs:
                     warn('Removing id "{}" from manifest'.format(invalidID))
@@ -1290,7 +1466,6 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                     if item_idx is not None:
                         del gamesdb[item_idx]
                 save_manifest(gamesdb)
-
                         
         # bail if there's nothing to do
         if len(items) == 0:
@@ -1306,8 +1481,6 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                 formattedIds =  ', '.join(map(str, idsOriginal))        
                 warn('with game id(s) from {%s}' % formattedIds)
             return
-            
-            
         items_count = len(items)
         print_padding = len(str(items_count))
         if not idsOriginal and not updateonly and not skipknown:
@@ -1315,8 +1488,6 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
             if skipids: 
                 formattedSkipIds =  ', '.join(map(str, skipids))        
                 info('not including game id(s) from {%s}' % formattedSkipIds)
-            
-            
     # fetch item details
     i = 0
     resumedb = sorted(items, key=lambda item: item.title)
@@ -1326,38 +1497,50 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
     
     resumedbInitLength = len(resumedb)
     for item in sorted(items, key=lambda item: item.title):
+        '''
         api_url  = GOG_ACCOUNT_URL
         api_url += "/gameDetails/{}.json".format(item.id)
+        '''
         
+        api_url  = GOG_EMBED_URL
+        api_url += "/account/gameDetails/{}.json".format(item.id)
         
-
         i += 1
-        info("(%*d / %d) fetching game details for %s..." % (print_padding, i, items_count, item.title))
-
-        try:
+        info("(%*d / %d) fetching product details for %s..." % (print_padding, i, items_count, item.title))
+       try:
             response = request(updateSession,api_url)
-            
             item_json_data = response.json()
-
+            specialKeys2 = ['backgroundImage','cdKey','forumLink','releaseTimestamp','messages','downloads','galaxyDownloads','extras','dlcs','bg_url','serial','forum_url','release_timestamp','gog_messages','simpleGalaxyDownloads','simpleGalaxyInstallers']    
+            for key in item_json_data:
+                if key not in specialKeys and key not in specialKeys2:
+                    item[key] = item_json_data[key]
+                    
             item.bg_url = item_json_data['backgroundImage']
             item.serial = item_json_data['cdKey']
             item.forum_url = item_json_data['forumLink']
-            item.changelog = item_json_data['changelog']
             item.release_timestamp = item_json_data['releaseTimestamp']
             item.gog_messages = item_json_data['messages']
             item.downloads = []
             item.galaxyDownloads = []
+            item.movies = []
+            item.galaxyMovies = []
             item.sharedDownloads = []
+            item.simpleGalaxyDownloads = []
             item.extras = []
-
+            item.dlcs = []
             # parse json data for downloads/extras/dlcs
-            filter_downloads(item.downloads, item_json_data['downloads'], lang_list, os_list,updateSession)
-            filter_downloads(item.galaxyDownloads, item_json_data['galaxyDownloads'], lang_list, os_list,updateSession)                
+            if item.isGame:
+                filter_downloads(item.downloads, item_json_data['downloads'], lang_list, os_list,updateSession)
+                filter_downloads(item.galaxyDownloads, item_json_data['galaxyDownloads'], lang_list, os_list,updateSession)
+            elif item.isMovie:
+                filter_downloads(item.movies, item_json_data['downloads'], lang_list, os_list,updateSession)
+                filter_downloads(item.galaxyMovies, item_json_data['galaxyDownloads'], lang_list, os_list,updateSession)                
+            filter_simpleGalaxyDownloads(item.simpleGalaxyDownloads,item_json_data['simpleGalaxyInstallers'],os_list,updateSession)        
             filter_extras(item.extras, item_json_data['extras'],updateSession)
-            filter_dlcs(item, item_json_data['dlcs'], lang_list, os_list,updateSession)
+            filter_dlcs(item.dlcs, item_json_data['dlcs'], lang_list, os_list,updateSession,item.isMovie,item.isGame)
             
             
-            #Indepent Deduplication to make sure there are no doubles within galaxyDownloads or downloads to avoid weird stuff with the comprehention.
+            #Indepent Deduplication to make sure there are no doubles within galaxyDownloads or downloads to avoid weird stuff with the comprehension.
             item.downloads = deDuplicateList(item.downloads,{})  
             item.galaxyDownloads = deDuplicateList(item.galaxyDownloads,{}) 
             
@@ -1376,7 +1559,6 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
             item.galaxyDownloads = deDuplicateList(item.galaxyDownloads,existingItems) 
             item.sharedDownloads = deDuplicateList(item.sharedDownloads,existingItems)                 
             item.extras = deDuplicateList(item.extras,existingItems)
-
             # update gamesdb with new item
             item_idx = item_checkdb(item.id, gamesdb)
             if item_idx is not None:
@@ -1486,8 +1668,6 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
 def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,skipgalaxy,skipstandalone,skipshared, skipfiles,downloadLimit = None):
     sizes, rates, errors = {}, {}, {}
     work = Queue()  # build a list of work items
-
-    load_cookies()
 
     items = load_manifest()
     work_dict = dict()
@@ -2186,8 +2366,12 @@ def cmd_verify(gamedir, skipextras, skipids,  check_md5, check_filesize, check_z
         # create orphan root dir
         orphan_root_dir = os.path.join(gamedir, ORPHAN_DIR_NAME)
         if not os.path.isdir(orphan_root_dir):
-            os.makedirs(orphan_root_dir)
-
+            try:
+                os.makedirs(orphan_root_dir)
+            except Exception:
+                error('Could not create orphan directory: ' + orphan_root_dir)
+                erorr('Aborting')
+                sys.exit(1)
         
         
     for game in games_to_check:
@@ -2444,6 +2628,10 @@ def cmd_clean(cleandir, dryrun):
             info('orphaned items moved to: {}'.format(orphan_root_dir))
     else:
         info('nothing to clean. nice and tidy!')
+        
+#Update, verify, download, verify a specified id for install
+def cmd_preinstallcheck():
+    pass
         
 def update_self():
     #To-Do: add auto-update to main using Last-Modified (repo for rolling, latest release for standard)
