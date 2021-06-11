@@ -34,7 +34,8 @@ import re
 import OpenSSL
 import platform
 import locale
-from fnmatch import fnmatch
+import fnmatch
+import ruamel.yaml
 # python 2 / 3 imports
 try:
     # python 2
@@ -101,6 +102,10 @@ debug = rootLogger.debug
 error = rootLogger.error
 log_exception = rootLogger.exception
 
+#YAML
+yamlf = ruamel.yaml.YAML(typ='safe')
+yamlp = ruamel.yaml.YAML()
+
 # filepath constants
 GAME_STORAGE_DIR = r'.'
 TOKEN_FILENAME = r'gog-token.dat'
@@ -108,16 +113,16 @@ TOKEN_FILENAME = r'gog-token.dat'
 MANIFEST_FILENAME = r'gog-manifest.dat'
 RESUME_MANIFEST_FILENAME = r'gog-resume-manifest.dat'
 '''
-MANIFEST_FILENAME = r'gog-manifest-embed.dat'
+MANIFEST_FILENAME = r'gog-manifest.yml'
+LEGACY_MANIFEST_FILENAME = r'gog-manifest-embed.dat'
+PRETTY_MANIFEST_FILENAME = r'gog-pretty-manifest.yml'
 RESUME_MANIFEST_FILENAME = r'gog-resume-manifest-embed.dat'
-
 CONFIG_FILENAME = r'gog-config.dat'
 SERIAL_FILENAME = r'!serial.txt'
 INFO_FILENAME = r'!info.txt'
 
-
 #github API URLs
-REPO_HOME_URL = "https://api.github.com/repos/kalanyr/gogrepo" 
+REPO_HOME_URL = "https://api.github.com/repos/kalanyr/gogrepoc" 
 NEW_RELEASE_URL = "/releases/latest"
 
 # GOG URLs
@@ -275,18 +280,69 @@ def request(session,url,args=None,byte_range=None,retries=HTTP_RETRY_COUNT,delay
 # --------------------------
 # Helper types and functions
 # --------------------------
-class AttrDict(dict):
-    def __init__(self, **kw):
-        self.update(kw)
+def make_literal_safe(checkString):
+    compiledff =  re.compile(r"\x0c")
+    match1 = compiledff.search(checkString)
+    checkString2 = checkString
+    if bool(match1):
+        debug('cleaning form feed')
+        checkString2 = compiledff.sub(u"yamlbackslashx0c",checkString2)        
+    match2 = ruamel.yaml.reader.Reader.NON_PRINTABLE.search(checkString2)
+    checkString3 = checkString2
+    if bool(match2):
+        warn('illegal character in YAML literal purged: ' +match2.group() + ' in ' + checkString + ' . Please file a report.')
+        checkString3 = ruamel.yaml.reader.Reader.NON_PRINTABLE.sub("",checkString3) 
+    return checkString3
 
-    def __getattr__(self, key):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(key)
-            
-    def __setattr__(self, key, val):
-        self[key] = val
+def restore_literal(checkString):
+    compiledff =  re.compile(r"yamlbackslashx0c")
+    match1 = compiledff.search(checkString)
+    checkString2 = checkString
+    if bool(match1):
+        debug('restoring form feed')
+        checkString2 = compiledff.sub(u"\x0c",checkString2)        
+    return checkString2
+
+if sys.version_info[0] == 2:
+    unicodestr = unicode
+else:
+    unicodestr = str
+
+@ruamel.yaml.yaml_object(yamlp)
+@ruamel.yaml.yaml_object(yamlf)
+class YAMLLiteralString(unicodestr):
+    def __new__(cls, value):
+        obj = unicodestr.__new__(cls, value)            
+        return obj
+
+    @classmethod
+    def to_yaml(cls, representer, node):
+        tag = getattr(cls, 'yaml_tag', '!' + cls.__name__)
+        processedNode = unicodestr(make_literal_safe(node))
+        return representer.represent_scalar(tag,processedNode,style='|')
+        
+    @classmethod
+    def from_yaml(cls, constructor, node):
+        return cls(restore_literal(node.value))
+
+@ruamel.yaml.yaml_object(yamlp)
+@ruamel.yaml.yaml_object(yamlf)
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__ = self
+
+    def __deepcopy__(self,memo):    
+        new_kwargs = dict()
+        for attr in self.__dict__:
+            new_kwargs[attr] = copy.deepcopy(getattr(self, attr),memo)
+        return self.__class__(**new_kwargs)                
+
+    @classmethod
+    def from_yaml(cls, constructor, node):
+        for m in constructor.construct_yaml_map(node):
+            pass
+        return cls(m)
 
 class ConditionalWriter(object):
     """File writer that only updates file on disk if contents chanaged"""
@@ -304,7 +360,6 @@ class ConditionalWriter(object):
         if tmp:
             pos = tmp.tell()
             tmp.seek(0)
-
             file_changed = not os.path.exists(self._filename)
             if not file_changed:
                 with codecs.open(self._filename, 'r', 'utf-8') as orig:
@@ -312,14 +367,12 @@ class ConditionalWriter(object):
                         if new_chunk != old_chunk:
                             file_changed = True
                             break
-
             if file_changed:
                 with codecs.open(self._filename, 'w', 'utf-8') as overwrite:
                     tmp.seek(0)
                     shutil.copyfileobj(tmp, overwrite)
 
-
-def load_manifest(filepath=MANIFEST_FILENAME):
+def load_legacy_manifest(filepath=LEGACY_MANIFEST_FILENAME):
     info('loading local manifest...')
     try:
         with codecs.open(filepath, 'rU', 'utf-8') as r:
@@ -329,7 +382,6 @@ def load_manifest(filepath=MANIFEST_FILENAME):
             compiledregexclose = re.compile(r"'changelog':.*?'downloads':|(})",re.DOTALL)
             compiledregexmungeopen = re.compile(r"[AttrDict(**]+{")
             compiledregexmungeclose = re.compile(r"}\)+")
-            
             def myreplacementopen(m):
                 if m.group(1):
                    return "AttrDict(**{"
@@ -340,22 +392,41 @@ def load_manifest(filepath=MANIFEST_FILENAME):
                     return "})"
                 else:
                     return m.group(0)
-            
             mungeDetected = compiledregexmungeopen.search(ad) 
             if mungeDetected:
                 info("detected AttrDict error in manifest")
                 ad = compiledregexmungeopen.sub("{",ad)
                 ad = compiledregexmungeclose.sub("}",ad)
                 info("fixed AttrDict in manifest")                
-
             ad =  compiledregexopen.sub(myreplacementopen,ad)
             ad =  compiledregexclose.sub(myreplacementclose,ad)
-
             if (sys.version_info[0] >= 3):
                 ad = re.sub(r"'size': ([0-9]+)L,",r"'size': \1,",ad)
             db = eval(ad)
+            for item in db:
+                if item.changelog:
+                    item.changelog = YAMLLiteralString(item.changelog)
+                item.gog_messages[:] = [YAMLLiteralString(gog_message) for gog_message in item.gog_messages]
             if (mungeDetected):
-                save_manifest(db)
+                save_legacy_manifest(db)
+        return db
+    except IOError:
+        return []
+
+def load_manifest(filepath=MANIFEST_FILENAME):
+    info('loading local YAML manifest...')
+    try:
+        with codecs.open(filepath, 'rU', 'utf-8') as r:
+            db = yamlf.load(r)
+        return db
+    except IOError:
+        return []
+
+def load__pretty_manifest(filepath=PRETTY_MANIFEST_FILENAME):
+    info('loading local human readable YAML manifest...')
+    try:
+        with codecs.open(filepath, 'rU', 'utf-8') as r:
+            db = yamlp.load(r)
         return db
     except IOError:
         return []
@@ -380,21 +451,45 @@ def load_token(filepath=TOKEN_FILENAME):
         return eval(ad)
     except IOError:
         return []
-        
 
-def save_manifest(items):
+def save_legacy_manifest(items):
     info('saving manifest...')
     try:
-        with codecs.open(MANIFEST_FILENAME, 'w', 'utf-8') as w:
+        with codecs.open(LEGACY_MANIFEST_FILENAME, 'w', 'utf-8') as w:
             print('# {} games'.format(len(items)), file=w)
             pprint.pprint(items, width=123, stream=w)
         info('saved manifest')
     except KeyboardInterrupt:
-        with codecs.open(MANIFEST_FILENAME, 'w', 'utf-8') as w:
+        with codecs.open(LEGACY_MANIFEST_FILENAME, 'w', 'utf-8') as w:
             print('# {} games'.format(len(items)), file=w)
             pprint.pprint(items, width=123, stream=w)
         info('saved manifest')            
         raise
+
+def save_manifest(items):
+    info('saving local YAML manifest...')
+    try:    
+        with codecs.open(MANIFEST_FILENAME, 'w', 'utf-8') as w:
+            yamlf.dump(items,w)
+        info('saved local YAML manifest')
+    except KeyboardInterrupt:
+        with codecs.open(MANIFEST_FILENAME, 'w', 'utf-8') as w:
+            yamlf.dump(items,w)
+        info('saved local YAML manifest')
+        raise
+
+def save_pretty_manifest(items):
+    info('saving local human readable YAML manifest...')
+    try:    
+        with codecs.open(PRETTY_MANIFEST_FILENAME, 'w', 'utf-8') as w:
+            yamlp.dump(items,w)
+            info('saved local human readable YAML manifest')
+    except KeyboardInterrupt:
+        with codecs.open(PRETTY_MANIFEST_FILENAME, 'w', 'utf-8') as w:
+            yamlf.dump(items,w)
+        info('saved local human readable YAML manifest')
+        raise
+
 def save_resume_manifest(items):
     info('saving resume manifest...')
     try:
@@ -419,7 +514,7 @@ def load_resume_manifest(filepath=RESUME_MANIFEST_FILENAME):
         return eval(ad)
     except IOError:
         return []
-        
+
 def save_config_file(items):
     info('saving config...')
     try:
@@ -444,21 +539,21 @@ def load_config_file(filepath=CONFIG_FILENAME):
         return eval(ad)
     except IOError:
         return []
+
 def open_notrunc(name, bufsize=4*1024):
     flags = os.O_WRONLY | os.O_CREAT
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY  # windows
     fd = os.open(name, flags, 0o666)
     return os.fdopen(fd, 'wb', bufsize)
-    
+
 def open_notruncwrrd(name, bufsize=4*1024):
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY  # windows
     fd = os.open(name, flags, 0o666)
     return os.fdopen(fd, 'r+b', bufsize)
-    
-    
+
 def hashstream(stream,start,end):
     stream.seek(start)
     readlength = (end - start)+1
@@ -480,7 +575,6 @@ def hashfile(afile, blocksize=65536):
         buf = afile.read(blocksize)
     return hasher.hexdigest()
 
-
 def test_zipfile(filename):
     """Opens filename and tests the file for ZIP integrity.  Returns True if
     zipfile passes the integrity test, False otherwise.
@@ -491,21 +585,17 @@ def test_zipfile(filename):
                 return True
     except zipfile.BadZipfile:
         return False
-
     return False
-
 
 def pretty_size(n):
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if n < 1024 or unit == 'TB':
             break
         n = n / 1024  # start at KB
-
     if unit == 'B':
         return "{0}{1}".format(n, unit)
     else:
         return "{0:.2f}{1}".format(n, unit)
-
 
 def get_total_size(dir):
     total = 0
@@ -513,7 +603,6 @@ def get_total_size(dir):
         for f in filenames:
             total += os.path.getsize(os.path.join(root, f))
     return total
-
 
 def item_checkdb(search_id, gamesdb):
     for i in range(len(gamesdb)):
@@ -532,7 +621,6 @@ def handle_game_renames(savedir,gamesdb,dryrun):
             _ = game.galaxyDownloads
         except KeyError:
             game.galaxyDownloads = []
-            
         try:
             a = game.sharedDownloads
         except KeyError:
@@ -560,7 +648,6 @@ def handle_game_renames(savedir,gamesdb,dryrun):
                 _ = item.old_name 
             except AttributeError:
                 item.old_name = None
-        
             if (item.old_name is not None):            
                 game_dir =  os.path.join(savedir, game.title)
                 src_file =  os.path.join(game_dir,item.old_name)
@@ -582,20 +669,16 @@ def handle_game_renames(savedir,gamesdb,dryrun):
                         error('    -> rename failed "{}" -> "{}"'.format(src_file, dst_file))
                         if not dryrun:
                             item.prev_verified = False
-                    
-            
 
 def handle_game_updates(olditem, newitem,strict):
     try:
         _ = olditem.galaxyDownloads
     except KeyError:
         olditem.galaxyDownloads = []
-        
     try:
         a = olditem.sharedDownloads
     except KeyError:
         olditem.sharedDownloads = []
-
 
     if newitem.has_updates:
         info('  -> gog flagged this game as updated')
@@ -919,7 +1002,7 @@ def deDuplicateName(potentialItem,clashDict):
 def check_skip_file(fname, skipfiles):
     # return pattern that matched, or None
     for skipf in skipfiles:
-        if fnmatch(fname, skipf):
+        if fnmatch.fnmatch(fname, skipf):
             return skipf
     return None
 
@@ -1507,7 +1590,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
         
         i += 1
         info("(%*d / %d) fetching product details for %s..." % (print_padding, i, items_count, item.title))
-       try:
+        try:
             response = request(updateSession,api_url)
             item_json_data = response.json()
             specialKeys2 = ['backgroundImage','cdKey','forumLink','releaseTimestamp','messages','downloads','galaxyDownloads','extras','dlcs','bg_url','serial','forum_url','release_timestamp','gog_messages','simpleGalaxyDownloads','simpleGalaxyInstallers']    
