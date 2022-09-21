@@ -1,1 +1,17 @@
+.idea
+*.yml
 *.pyc
+*.bat
+*.dat
+*.log
+*.html
+*.dump
+*.tmp
+*.bak
+*.log.*
+cookies
+cookies*
+cookies.*
+cookies*.*
+*cookies*
+*cookies*.*
