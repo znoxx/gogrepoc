@@ -236,9 +236,15 @@ def request(session,url,args=None,byte_range=None,retries=HTTP_RETRY_COUNT,delay
                     token_response = session.get(GOG_TOKEN_URL,params={'client_id':'46899977096215655' ,'client_secret':'9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9', 'grant_type': 'refresh_token','refresh_token': session.token['refresh_token']})   
                     token_response.raise_for_status()    
                 except Exception as e:
-                    error(e)
-                    error('Could not renew token, Please login again.')
-                    sys.exit(1)
+                        if retries > 0:
+                            _retry = True
+                        else:
+                            error(e)
+                            error('Could not renew token, Please login again.')
+                            sys.exit(1)
+                        if _retry:
+                            warn('token refresh failed: %s (%d retries left) -- will retry in %ds...' % (e, retries, HTTP_RETRY_DELAY))
+                            return request(session=session,url=url, args=args, byte_range=byte_range, retries=retries-1, delay=HTTP_RETRY_DELAY)
                 token_json = token_response.json()
                 for item in token_json:
                     session.token[item] = token_json[item]
