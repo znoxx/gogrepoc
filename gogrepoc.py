@@ -265,7 +265,7 @@ def renew_token(session,retries=HTTP_RETRY_COUNT,delay=None):
 
         time_now = time.time()
         try:
-            if time_now + 60 > session.token['expiry']:
+            if time_now + 300 > session.token['expiry']:
                 info('refreshing token')
                 try:
                     token_response = session.get(GOG_TOKEN_URL,params={'client_id':'46899977096215655' ,'client_secret':'9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9', 'grant_type': 'refresh_token','refresh_token': session.token['refresh_token']})   
@@ -339,35 +339,7 @@ class ConditionalWriter(object):
                     tmp.seek(0)
                     shutil.copyfileobj(tmp, overwrite)
 
-def load_cookies():
-    # try to load as default lwp format
-    try:
-        global_cookies.load()
-        return
-    except IOError:
-        pass
 
-    # try to import as mozilla 'cookies.txt' format
-    try:
-        with codecs.open(NETSCAPE_COOKIES_FILENAME,"rU",'utf-8') as f1:
-            with codecs.open(NETSCAPE_COOKIES_TMP_FILENAME,"w",'utf-8') as f2:
-                for line in f1:
-                    line = line.replace(u"#HttpOnly_",u"")
-                    line=line.strip()
-                    if not (line.startswith(u"#")):
-                        if (u"gog.com" in line): 
-                            f2.write(line+u"\n")
-        tmp_jar = cookiejar.MozillaCookieJar(NETSCAPE_COOKIES_TMP_FILENAME)
-        tmp_jar.load()
-        for c in tmp_jar:
-            global_cookies.set_cookie(c)
-        global_cookies.save()
-        return
-    except IOError:
-        pass
-
-    error('failed to load cookies, did you login first?')
-    raise SystemExit(1)
 
 
 def load_manifest(filepath=MANIFEST_FILENAME):
@@ -1611,8 +1583,6 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
 def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,skipgalaxy,skipstandalone,skipshared, skipfiles,downloadLimit = None):
     sizes, rates, errors = {}, {}, {}
     work = Queue()  # build a list of work items
-
-    load_cookies()
 
     items = load_manifest()
     work_dict = dict()
