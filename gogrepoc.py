@@ -41,14 +41,14 @@ try:
     # python 2
     from Queue import Queue
     import cookielib as cookiejar
-    from urlparse import urlparse,unquote,urlunparse
+    from urlparse import urlparse,unquote,urlunparse,parse_qs
     from itertools import izip_longest as zip_longest
     from StringIO import StringIO
 except ImportError:
     # python 3
     from queue import Queue
     import http.cookiejar as cookiejar
-    from urllib.parse import urlparse, unquote, urlunparse
+    from urllib.parse import urlparse, unquote, urlunparse,parse_qs
     from itertools import zip_longest
     from io import StringIO
     
@@ -110,6 +110,7 @@ log_exception = rootLogger.exception
 
 # filepath constants
 GAME_STORAGE_DIR = r'.'
+TOKEN_FILENAME = r'gog-token.dat'
 COOKIES_FILENAME = r'gog-cookies.dat'
 NETSCAPE_COOKIES_FILENAME = r'cookies.txt'
 NETSCAPE_COOKIES_TMP_FILENAME = r'cookies.txt.tmp'
@@ -130,6 +131,14 @@ NEW_RELEASE_URL = "/releases/latest"
 GOG_HOME_URL = r'https://www.gog.com'
 GOG_ACCOUNT_URL = r'https://www.gog.com/account'
 GOG_LOGIN_URL = r'https://login.gog.com/login_check'
+
+#GOG Galaxy URLs
+GOG_AUTH_URL = r'https://auth.gog.com/auth'
+GOG_GALAXY_REDIRECT_URL = r'https://embed.gog.com/on_login_success'
+GOG_CLIENT_ID = '46899977096215655'
+GOG_SECRET = '9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9'
+GOG_TOKEN_URL = r'https://auth.gog.com/token'
+GOG_EMBED_URL = r'https://embed.gog.com'
 
 # GOG Constants
 GOG_MEDIA_TYPE_GAME  = '1'
@@ -208,6 +217,8 @@ ORPHAN_DIR_EXCLUDE_LIST = [ORPHAN_DIR_NAME,DOWNLOADING_DIR_NAME, '!misc']
 ORPHAN_FILE_EXCLUDE_LIST = [INFO_FILENAME, SERIAL_FILENAME]
 RESUME_SAVE_THRESHOLD = 50
 
+token_lock = threading.RLock()
+
 #temporary request wrapper while testing sessions module in context of update. Will replace request when complete
 def request(session,url,args=None,byte_range=None,retries=HTTP_RETRY_COUNT,delay=None,stream=False,data=None):
     """Performs web request to url with optional retries, delay, and byte range.
@@ -215,6 +226,8 @@ def request(session,url,args=None,byte_range=None,retries=HTTP_RETRY_COUNT,delay
     _retry = False
     if delay is not None:
         time.sleep(delay)
+
+    renew_token(session)
 
     try:
         if data is not None:        
@@ -243,6 +256,42 @@ def request(session,url,args=None,byte_range=None,retries=HTTP_RETRY_COUNT,delay
             return request(session=session,url=url, args=args, byte_range=byte_range, retries=retries-1, delay=HTTP_RETRY_DELAY)
     return response
     
+
+def renew_token(session,retries=HTTP_RETRY_COUNT,delay=None):
+    with token_lock:
+        _retry = False
+        if delay is not None:
+            time.sleep(delay)
+
+        time_now = time.time()
+        try:
+            if time_now + 300 > session.token['expiry']:
+                info('refreshing token')
+                try:
+                    token_response = session.get(GOG_TOKEN_URL,params={'client_id':'46899977096215655' ,'client_secret':'9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9', 'grant_type': 'refresh_token','refresh_token': session.token['refresh_token']})   
+                    token_response.raise_for_status()    
+                except Exception as e:
+                        if retries > 0:
+                            _retry = True
+                        else:
+                            error(e)
+                            error('Could not renew token, Please login again.')
+                            sys.exit(1)
+                        if _retry:
+                            warn('token refresh failed: %s (%d retries left) -- will retry in %ds...' % (e, retries, HTTP_RETRY_DELAY))
+                            return renew_token(session=session, retries=retries-1, delay=HTTP_RETRY_DELAY)
+                token_json = token_response.json()
+                for item in token_json:
+                    session.token[item] = token_json[item]
+                session.token['expiry'] = time_now + token_json['expires_in']
+                save_token(session.token)           
+                session.headers['Authorization'] = "Bearer " + session.token['access_token']
+                info('refreshed token')            
+        except AttributeError:
+            #Not a Token based session
+            pass
+
+
 
 # --------------------------
 # Helper types and functions
@@ -290,35 +339,7 @@ class ConditionalWriter(object):
                     tmp.seek(0)
                     shutil.copyfileobj(tmp, overwrite)
 
-def load_cookies():
-    # try to load as default lwp format
-    try:
-        global_cookies.load()
-        return
-    except IOError:
-        pass
 
-    # try to import as mozilla 'cookies.txt' format
-    try:
-        with codecs.open(NETSCAPE_COOKIES_FILENAME,"rU",'utf-8') as f1:
-            with codecs.open(NETSCAPE_COOKIES_TMP_FILENAME,"w",'utf-8') as f2:
-                for line in f1:
-                    line = line.replace(u"#HttpOnly_",u"")
-                    line=line.strip()
-                    if not (line.startswith(u"#")):
-                        if (u"gog.com" in line): 
-                            f2.write(line+u"\n")
-        tmp_jar = cookiejar.MozillaCookieJar(NETSCAPE_COOKIES_TMP_FILENAME)
-        tmp_jar.load()
-        for c in tmp_jar:
-            global_cookies.set_cookie(c)
-        global_cookies.save()
-        return
-    except IOError:
-        pass
-
-    error('failed to load cookies, did you login first?')
-    raise SystemExit(1)
 
 
 def load_manifest(filepath=MANIFEST_FILENAME):
@@ -1054,8 +1075,9 @@ def process_argv(argv):
 # Commands
 # --------
 def cmd_login(user, passwd):
-    """Attempts to log into GOG and saves the resulting cookiejar to disk.
+    """Attempts to log into GOG Galaxy API and saves the resulting Token to disk.
     """
+    
     login_data = {'user': user,
                   'passwd': passwd,
                   'auth_url': None,
@@ -1063,91 +1085,102 @@ def cmd_login(user, passwd):
                   'two_step_url': None,
                   'two_step_token': None,
                   'two_step_security_code': None,
-                  'login_success': False,
+                  'login_success': None
                   }
-
-    global_cookies.clear()  # reset cookiejar
+    
 
     # prompt for login/password if needed
     if login_data['user'] is None:
         login_data['user'] = input("Username: ")
     if login_data['passwd'] is None:
         login_data['passwd'] = getpass.getpass()
+        
+    token_data = {'user': login_data['user'],
+                  'passwd': login_data['passwd'],
+                  'auth_url': None,
+                  'login_token': None,
+                  'two_step_url': None,
+                  'two_step_token': None,
+                  'two_step_security_code': None,
+                  'login_code':None
+                  }
+        
 
-    info("attempting gog login as '{}' ...".format(login_data['user']))
     
     loginSession = makeGOGSession(True)
-
-    # fetch the auth url
     
-    page_response = request(loginSession,GOG_HOME_URL)    
-    etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
-    for elm in etree.findall('.//script'):
-        if elm.text is not None and 'GalaxyAccounts' in elm.text:
-            authCandidates = elm.text.split("'")
-            for authCandidate in authCandidates:
-                if 'auth' in authCandidate:
-                    testAuth = urlparse(authCandidate)
-                    if testAuth.scheme == "https":
-                        login_data['auth_url'] = authCandidate
-                        break
-            if login_data['auth_url']:
-                break
-                
-    if not login_data['auth_url']:
-        error("cannot find auth url, please report to the maintainer")
-        exit()
-
-    page_response = request(loginSession,login_data['auth_url'])          
+    # fetch the auth url
+    info("attempting Galaxy login as '{}' ...".format(token_data['user']))
+    
+    page_response = request(loginSession,GOG_AUTH_URL,args={'client_id':GOG_CLIENT_ID ,'redirect_uri': GOG_GALAXY_REDIRECT_URL + '?origin=client','response_type': 'code','layout':'client2'})
     # fetch the login token
     etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
-    # Bail if we find a request for a reCAPTCHA
-    if len(etree.findall('.//div[@class="g-recaptcha form__recaptcha"]')) > 0:
-        error("cannot continue, gog is asking for a reCAPTCHA :(  try again in a few minutes.")
-        return
+    # Bail if we find a request for a reCAPTCHA *in the login form*
+    loginForm = etree.find('.//form[@name="login"]')
+    if (not loginForm) or len(loginForm.findall('.//div[@class="g-recaptcha form__recaptcha"]')) > 0:
+        if not loginForm:
+            error("Could not locate login form on login page to test for reCAPTCHA, please contact the maintainer. In the meantime use a browser (Firefox recommended) to sign in at the below url and then copy & paste the full URL")
+        else:
+            error("gog is asking for a reCAPTCHA :(  Please use a browser (Firefox recommended) to sign in at the below url and then copy & paste the full URL")
+        error(page_response.url)
+        inputUrl  = input("Signed In URL: ")
+        try:
+            parsed = urlparse(inputUrl)    
+            query_parsed = parse_qs(parsed.query)
+            token_data['login_code'] = query_parsed['code']
+        except Exception:
+            error("Could not parse entered URL. Try again later or report to the maintainer")
+            return 
     for elm in etree.findall('.//input'):
         if elm.attrib['id'] == 'login__token':
-            login_data['login_token'] = elm.attrib['value']
+            token_data['login_token'] = elm.attrib['value']
             break
+            
+    if not token_data['login_code']:        
 
-    # perform login and capture two-step token if required
-    page_response = request(loginSession,GOG_LOGIN_URL, data={'login[username]': login_data['user'],
-                                               'login[password]': login_data['passwd'],
-                                               'login[login]': '',
-                                               'login[_token]': login_data['login_token']}) 
-    etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
-    if 'two_step' in page_response.url:
-        login_data['two_step_url'] = page_response.url
-        for elm in etree.findall('.//input'):
-            if elm.attrib['id'] == 'second_step_authentication__token':
-                login_data['two_step_token'] = elm.attrib['value']
-                break
-    elif 'on_login_success' in page_response.url:
-        login_data['login_success'] = True
+        # perform login and capture two-step token if required
+        page_response = request(loginSession,GOG_LOGIN_URL, data={'login[username]': token_data['user'],
+                                                   'login[password]': token_data['passwd'],
+                                                   'login[login]': '',
+                                                   'login[_token]': token_data['login_token']}) 
+        etree = html5lib.parse(page_response.text, namespaceHTMLElements=False)
+        if 'two_step' in page_response.url:
+            token_data['two_step_url'] = page_response.url
+            for elm in etree.findall('.//input'):
+                if elm.attrib['id'] == 'second_step_authentication__token':
+                    token_data['two_step_token'] = elm.attrib['value']
+                    break
+        elif 'on_login_success' in page_response.url:
+            parsed = urlparse(page_response.url)    
+            query_parsed = parse_qs(parsed.query)
+            token_data['login_code'] = query_parsed['code']
+            
 
-    # perform two-step if needed
-    if login_data['two_step_url'] is not None:
-        login_data['two_step_security_code'] = input("enter two-step security code: ")
+        # perform two-step if needed
+        if token_data['two_step_url'] is not None:
+            token_data['two_step_security_code'] = input("enter two-step security code: ")
 
-        # Send the security code back to GOG
-        page_response= request(loginSession,login_data['two_step_url'], 
-                     data={'second_step_authentication[token][letter_1]': login_data['two_step_security_code'][0],
-                           'second_step_authentication[token][letter_2]': login_data['two_step_security_code'][1],
-                           'second_step_authentication[token][letter_3]': login_data['two_step_security_code'][2],
-                           'second_step_authentication[token][letter_4]': login_data['two_step_security_code'][3],
-                           'second_step_authentication[send]': "",
-                           'second_step_authentication[_token]': login_data['two_step_token']})
-        if 'on_login_success' in page_response.url:
-            login_data['login_success'] = True
-
-    # save cookies on success
-    if login_data['login_success']:
-        info('login successful!')
-        for c in loginSession.cookies:
-            global_cookies.set_cookie(c)
-        global_cookies.save()
+            # Send the security code back to GOG
+            page_response= request(loginSession,token_data['two_step_url'], 
+                         data={'second_step_authentication[token][letter_1]': token_data['two_step_security_code'][0],
+                               'second_step_authentication[token][letter_2]': token_data['two_step_security_code'][1],
+                               'second_step_authentication[token][letter_3]': token_data['two_step_security_code'][2],
+                               'second_step_authentication[token][letter_4]': token_data['two_step_security_code'][3],
+                               'second_step_authentication[send]': "",
+                               'second_step_authentication[_token]': token_data['two_step_token']})
+            if 'on_login_success' in page_response.url:
+                parsed = urlparse(page_response.url)    
+                query_parsed = parse_qs(parsed.query)
+                token_data['login_code'] = query_parsed['code']
+                        
+    if token_data['login_code']:
+        token_start = time.time()
+        token_response = request(loginSession,GOG_TOKEN_URL,args={'client_id':'46899977096215655' ,'client_secret':'9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9', 'grant_type': 'authorization_code','code': token_data['login_code'],'redirect_uri': 'https://embed.gog.com/on_login_success?origin=client'})    
+        token_json = token_response.json()
+        token_json['expiry'] = token_start + token_json['expires_in']
+        save_token(token_json)           
     else:
-        error('login failed, verify your username/password and try again.')
+        error('Galaxy login failed, verify your username/password and try again.')
 
 def makeGitHubSession(authenticatedSession=False):
     gitSession = requests.Session()
@@ -1156,11 +1189,36 @@ def makeGitHubSession(authenticatedSession=False):
         
 def makeGOGSession(loginSession=False):
     gogSession = requests.Session()
-    gogSession.headers={'User-Agent':USER_AGENT}
     if not loginSession:
-        load_cookies()
-        gogSession.cookies.update(global_cookies)
+        gogSession.token = load_token()
+        try:
+            gogSession.headers={'User-Agent':USER_AGENT,'Authorization':'Bearer ' + gogSession.token['access_token']}    
+        except AttributeError: 
+            error('failed to find token (did you log in?)')
+            sys.exit(1)
     return gogSession
+
+def save_token(token):
+    info('saving token...')
+    try:
+        with codecs.open(TOKEN_FILENAME, 'w', 'utf-8') as w:
+            pprint.pprint(token, width=123, stream=w)
+        info('saved token')
+    except KeyboardInterrupt:
+        with codecs.open(TOKEN_FILENAME, 'w', 'utf-8') as w:
+            pprint.pprint(token, width=123, stream=w)
+        info('saved token')            
+        raise
+
+def load_token(filepath=TOKEN_FILENAME):
+    info('loading token...')
+    try:
+        with codecs.open(filepath, 'rU', 'utf-8') as r:
+            ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
+        return eval(ad)
+    except IOError:
+        return []
+        
 
 def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,skipHidden,installers,resumemode,strict):
     media_type = GOG_MEDIA_TYPE_GAME
@@ -1525,8 +1583,6 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
 def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,skipgalaxy,skipstandalone,skipshared, skipfiles,downloadLimit = None):
     sizes, rates, errors = {}, {}, {}
     work = Queue()  # build a list of work items
-
-    load_cookies()
 
     items = load_manifest()
     work_dict = dict()
