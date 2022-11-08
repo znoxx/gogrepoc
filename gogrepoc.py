@@ -191,7 +191,8 @@ if not (sysOS in VALID_OS_TYPES):
     sysOS = 'linux'
 DEFAULT_OS_LIST = [sysOS]
 sysLang,_ = locale.getdefaultlocale()
-sysLang = sysLang[:2]
+if (sysLang is not None):
+    sysLang = sysLang[:2]
 if not (sysLang in VALID_LANG_TYPES):
     sysLang = 'en'
 DEFAULT_LANG_LIST = [sysLang]
