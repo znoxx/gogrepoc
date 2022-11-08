@@ -40,14 +40,12 @@ from fnmatch import fnmatch
 try:
     # python 2
     from Queue import Queue
-    import cookielib as cookiejar
     from urlparse import urlparse,unquote,urlunparse,parse_qs
     from itertools import izip_longest as zip_longest
     from StringIO import StringIO
 except ImportError:
     # python 3
     from queue import Queue
-    import http.cookiejar as cookiejar
     from urllib.parse import urlparse, unquote, urlunparse,parse_qs
     from itertools import zip_longest
     from io import StringIO
@@ -86,11 +84,6 @@ FILE_BEGIN = 0x0
 
 
 # lib mods
-# bypass the hardcoded "Netscape HTTP Cookie File" check
-if hasattr(cookiejar.MozillaCookieJar.magic_re, "search"):
-    cookiejar.MozillaCookieJar.magic_re = re.compile(r'.*') 
-else:
-    cookiejar.MozillaCookieJar.magic_re = r'.*'  
 # configure logging
 logFormatter = logging.Formatter("%(asctime)s | %(message)s", datefmt='%H:%M:%S')
 rootLogger = logging.getLogger('ws')
@@ -111,20 +104,15 @@ log_exception = rootLogger.exception
 # filepath constants
 GAME_STORAGE_DIR = r'.'
 TOKEN_FILENAME = r'gog-token.dat'
-COOKIES_FILENAME = r'gog-cookies.dat'
-NETSCAPE_COOKIES_FILENAME = r'cookies.txt'
-NETSCAPE_COOKIES_TMP_FILENAME = r'cookies.txt.tmp'
 MANIFEST_FILENAME = r'gog-manifest.dat'
 RESUME_MANIFEST_FILENAME = r'gog-resume-manifest.dat'
 CONFIG_FILENAME = r'gog-config.dat'
 SERIAL_FILENAME = r'!serial.txt'
 INFO_FILENAME = r'!info.txt'
 
-# global web utilities
-global_cookies = cookiejar.LWPCookieJar(COOKIES_FILENAME)
 
 #github API URLs
-REPO_HOME_URL = "https://api.github.com/repos/kalanyr/gogrepo" 
+REPO_HOME_URL = "https://api.github.com/repos/kalanyr/gogrepoc" 
 NEW_RELEASE_URL = "/releases/latest"
 
 # GOG URLs
@@ -185,6 +173,12 @@ LANG_TABLE = {'en': u'English',   # English
 
 VALID_OS_TYPES = ['windows', 'linux', 'mac']
 VALID_LANG_TYPES = list(LANG_TABLE.keys())
+if (sys.version_info[0] >= 3):
+    universalLineEnd = ''
+else:
+    universalLineEnd = 'U'
+
+
 
 DEFAULT_FALLBACK_LANG = 'en'
 
@@ -345,7 +339,7 @@ class ConditionalWriter(object):
 def load_manifest(filepath=MANIFEST_FILENAME):
     info('loading local manifest...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
 #            ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
             ad = r.read()
             compiledregexopen =  re.compile(r"'changelog':.*?'downloads':|({)",re.DOTALL)
@@ -414,7 +408,7 @@ def save_resume_manifest(items):
 def load_resume_manifest(filepath=RESUME_MANIFEST_FILENAME):
     info('loading local resume manifest...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
             ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
             if (sys.version_info[0] >= 3):
                 ad = re.sub(r"'size': ([0-9]+)L,",r"'size': \1,",ad)
@@ -439,7 +433,7 @@ def save_config_file(items):
 def load_config_file(filepath=CONFIG_FILENAME):
     info('loading config...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
             ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
             #if (sys.version_info[0] >= 3):
             #    ad = re.sub(r"'size': ([0-9]+)L,",r"'size': \1,",ad)
@@ -905,7 +899,7 @@ def process_argv(argv):
     sp1 = p1.add_subparsers(help='command', dest='command', title='commands')
     sp1.required = True
 
-    g1 = sp1.add_parser('login', help='Login to GOG and save a local copy of your authenticated cookie')
+    g1 = sp1.add_parser('login', help='Login to GOG and save a local copy of your authenticated token')
     g1.add_argument('username', action='store', help='GOG username/email', nargs='?', default=None)
     g1.add_argument('password', action='store', help='GOG password', nargs='?', default=None)
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
@@ -1213,11 +1207,11 @@ def save_token(token):
 def load_token(filepath=TOKEN_FILENAME):
     info('loading token...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
             ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
         return eval(ad)
     except IOError:
-        return []
+        return {}
         
 
 def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,skipHidden,installers,resumemode,strict):
