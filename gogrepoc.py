@@ -40,14 +40,12 @@ from fnmatch import fnmatch
 try:
     # python 2
     from Queue import Queue
-    import cookielib as cookiejar
     from urlparse import urlparse,unquote,urlunparse,parse_qs
     from itertools import izip_longest as zip_longest
     from StringIO import StringIO
 except ImportError:
     # python 3
     from queue import Queue
-    import http.cookiejar as cookiejar
     from urllib.parse import urlparse, unquote, urlunparse,parse_qs
     from itertools import zip_longest
     from io import StringIO
@@ -86,11 +84,6 @@ FILE_BEGIN = 0x0
 
 
 # lib mods
-# bypass the hardcoded "Netscape HTTP Cookie File" check
-if hasattr(cookiejar.MozillaCookieJar.magic_re, "search"):
-    cookiejar.MozillaCookieJar.magic_re = re.compile(r'.*') 
-else:
-    cookiejar.MozillaCookieJar.magic_re = r'.*'  
 # configure logging
 logFormatter = logging.Formatter("%(asctime)s | %(message)s", datefmt='%H:%M:%S')
 rootLogger = logging.getLogger('ws')
@@ -111,20 +104,15 @@ log_exception = rootLogger.exception
 # filepath constants
 GAME_STORAGE_DIR = r'.'
 TOKEN_FILENAME = r'gog-token.dat'
-COOKIES_FILENAME = r'gog-cookies.dat'
-NETSCAPE_COOKIES_FILENAME = r'cookies.txt'
-NETSCAPE_COOKIES_TMP_FILENAME = r'cookies.txt.tmp'
 MANIFEST_FILENAME = r'gog-manifest.dat'
 RESUME_MANIFEST_FILENAME = r'gog-resume-manifest.dat'
 CONFIG_FILENAME = r'gog-config.dat'
 SERIAL_FILENAME = r'!serial.txt'
 INFO_FILENAME = r'!info.txt'
 
-# global web utilities
-global_cookies = cookiejar.LWPCookieJar(COOKIES_FILENAME)
 
 #github API URLs
-REPO_HOME_URL = "https://api.github.com/repos/kalanyr/gogrepo" 
+REPO_HOME_URL = "https://api.github.com/repos/kalanyr/gogrepoc" 
 NEW_RELEASE_URL = "/releases/latest"
 
 # GOG URLs
@@ -148,7 +136,7 @@ GOG_MEDIA_TYPE_MOVIE = '2'
 HTTP_FETCH_DELAY = 1   # in seconds
 HTTP_RETRY_DELAY = 5   # in seconds
 HTTP_RETRY_COUNT = 3
-HTTP_TIMEOUT = 30
+HTTP_TIMEOUT = 60
 
 HTTP_GAME_DOWNLOADER_THREADS = 4
 HTTP_PERM_ERRORCODES = (404, 403, 503)
@@ -185,6 +173,12 @@ LANG_TABLE = {'en': u'English',   # English
 
 VALID_OS_TYPES = ['windows', 'linux', 'mac']
 VALID_LANG_TYPES = list(LANG_TABLE.keys())
+if (sys.version_info[0] >= 3):
+    universalLineEnd = ''
+else:
+    universalLineEnd = 'U'
+
+
 
 DEFAULT_FALLBACK_LANG = 'en'
 
@@ -196,8 +190,10 @@ if sysOS == 'darwin':
 if not (sysOS in VALID_OS_TYPES):
     sysOS = 'linux'
 DEFAULT_OS_LIST = [sysOS]
-sysLang,_ = locale.getdefaultlocale()
-sysLang = sysLang[:2]
+sysLang,_ = locale.getlocale()
+if (sysLang is not None):
+    sysLang = sysLang[:2]
+    sysLang = sysLang.lower()
 if not (sysLang in VALID_LANG_TYPES):
     sysLang = 'en'
 DEFAULT_LANG_LIST = [sysLang]
@@ -339,13 +335,36 @@ class ConditionalWriter(object):
                     tmp.seek(0)
                     shutil.copyfileobj(tmp, overwrite)
 
-
-
-
+def move_with_increment_on_clash(src,dst,count=0):
+    if (count == 0):
+        potDst = dst
+    else:
+        root,ext = os.path.splitext(dst)
+        if (ext != ".bin"):
+            potDst = root + "("+str(count) + ")" + ext
+        else:
+            #bin file, adjust name to account for gogs weird extension method
+            setDelimiter = root.rfind("-")
+            try:
+                setPart = int(root[setDelimiter+1:])
+            except ValueError:
+                #This indicators a false positive. The "-" found was part of the file name not a set delimiter. 
+                setDelimiter = -1 
+            if (setDelimiter == -1):
+                #not part of a bin file set , some other binary file , treat it like a non .bin file
+                potDst = root + "("+str(count) + ")" + ext
+            else:    
+                potDst = root[:setDelimiter] + "("+str(count) + ")" + root[setDelimiter:] + ext
+        warn('Unresolved destination clash for "{}" detected. Trying "{}"'.format(dst,potDst))
+    if not os.path.exists(potDst):
+        shutil.move(src,potDst)
+    else:
+        move_with_increment_on_clash(src,dst,count+1)
+    
 def load_manifest(filepath=MANIFEST_FILENAME):
     info('loading local manifest...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
 #            ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
             ad = r.read()
             compiledregexopen =  re.compile(r"'changelog':.*?'downloads':|({)",re.DOTALL)
@@ -366,10 +385,10 @@ def load_manifest(filepath=MANIFEST_FILENAME):
             
             mungeDetected = compiledregexmungeopen.search(ad) 
             if mungeDetected:
-                info("detected AttrDict error in manifest")
+                warn("detected AttrDict error in manifest")
                 ad = compiledregexmungeopen.sub("{",ad)
                 ad = compiledregexmungeclose.sub("}",ad)
-                info("fixed AttrDict in manifest")                
+                warn("fixed AttrDict in manifest")                
 
             ad =  compiledregexopen.sub(myreplacementopen,ad)
             ad =  compiledregexclose.sub(myreplacementclose,ad)
@@ -414,7 +433,7 @@ def save_resume_manifest(items):
 def load_resume_manifest(filepath=RESUME_MANIFEST_FILENAME):
     info('loading local resume manifest...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
             ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
             if (sys.version_info[0] >= 3):
                 ad = re.sub(r"'size': ([0-9]+)L,",r"'size': \1,",ad)
@@ -439,7 +458,7 @@ def save_config_file(items):
 def load_config_file(filepath=CONFIG_FILENAME):
     info('loading config...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
             ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
             #if (sys.version_info[0] >= 3):
             #    ad = re.sub(r"'size': ([0-9]+)L,",r"'size': \1,",ad)
@@ -548,12 +567,12 @@ def handle_game_renames(savedir,gamesdb,dryrun):
             if os.path.isdir(src_dir):
                 try:
                     if os.path.exists(dst_dir):
-                        info("orphaning destination clash '{}'".format(dst_dir))
+                        warn("orphaning destination clash '{}'".format(dst_dir))
                         if not dryrun:
-                            shutil.move(dst_dir, orphan_root_dir)
+                            move_with_increment_on_clash(dst_dir, os.path.join(orphan_root_dir,game.title))
                     info('  -> renaming directory "{}" -> "{}"'.format(src_dir, dst_dir))            
                     if not dryrun:                    
-                        shutil.move(src_dir,dst_dir)
+                        move_with_increment_on_clash(src_dir,dst_dir)
                 except Exception: 
                     error('    -> rename failed "{}" -> "{}"'.format(game.old_title, game.title))
         for item in game.downloads+game.galaxyDownloads+game.sharedDownloads+game.extras:
@@ -569,16 +588,16 @@ def handle_game_renames(savedir,gamesdb,dryrun):
                 if os.path.isfile(src_file):
                     try:
                         if os.path.exists(dst_file):
-                            info("orphaning destination clash '{}'".format(dst_file))
+                            warn("orphaning destination clash '{}'".format(dst_file))
                             dest_dir = os.path.join(orphan_root_dir, game.title)
                             if not os.path.isdir(dest_dir):
                                 if not dryrun:
                                     os.makedirs(dest_dir)
                             if not dryrun:
-                                shutil.move(dst_file, dest_dir)
+                                move_with_increment_on_clash(dst_file, os.path.join(dest_dir,item.name))
                         info('  -> renaming file "{}" -> "{}"'.format(src_file, dst_file))
                         if not dryrun:
-                            shutil.move(src_file,dst_file)
+                            move_with_increment_on_clash(src_file,dst_file)
                     except Exception:
                         error('    -> rename failed "{}" -> "{}"'.format(src_file, dst_file))
                         if not dryrun:
@@ -668,27 +687,31 @@ def fetch_chunk_tree(response, session):
                 warn("no md5 data found for {}".format(chunk_url))
             else:
                 warn("unexpected error fetching md5 data for {}".format(chunk_url))                
-            warn("The handled exception was:")
-            log_exception('')
-            warn("End exception report.")
+                debug("The handled exception was:")
+                if rootLogger.isEnabledFor(logging.DEBUG):
+                    log_exception('')                
+                debug("End exception report.")
             return None
         except xml.etree.ElementTree.ParseError:
             warn('xml parsing error occurred trying to get md5 data for {}'.format(chunk_url))
-            warn("The handled exception was:")
-            log_exception('')
-            warn("End exception report.")
+            debug("The handled exception was:")
+            if rootLogger.isEnabledFor(logging.DEBUG):
+                log_exception('')                
+            debug("End exception report.")
             return None
         except requests.exceptions.ConnectionError as e:
             warn("unexpected connection error fetching md5 data for {}".format(chunk_url) + " This error may be temporary. Please retry in 24 hours.")
-            warn("The handled exception was:")
-            log_exception('')
-            warn("End exception report.")
+            debug("The handled exception was:")
+            if rootLogger.isEnabledFor(logging.DEBUG):
+                log_exception('')                
+            debug("End exception report.")
             return None 
         except requests.exceptions.ContentDecodingError as e:
             warn("unexpected content decoding error fetching md5 data for {}".format(chunk_url) + " This error may be temporary. Please retry in 24 hours.")
-            warn("The handled exception was:")
-            log_exception('')
-            warn("End exception report.")
+            debug("The handled exception was:")
+            if rootLogger.isEnabledFor(logging.DEBUG):
+                log_exception('')                
+            debug("End exception report.")
             return None 
     return None
 
@@ -716,24 +739,28 @@ def fetch_file_info(d, fetch_md5,updateSession):
                     warn("no md5 data found for {}".format(d.name))
                 else:
                     warn("unexpected error fetching md5 data for {}".format(d.name))                
-                warn("The handled exception was:")
-                log_exception('')
-                warn("End exception report.")
+                debug("The handled exception was:")
+                if rootLogger.isEnabledFor(logging.DEBUG):
+                    log_exception('')
+                debug("End exception report.")
             except xml.etree.ElementTree.ParseError as e:
                 warn('xml parsing error occurred trying to get md5 data for {}'.format(d.name))
-                warn("The handled exception was:")
-                log_exception('')
-                warn("End exception report.")
+                debug("The handled exception was:")
+                if rootLogger.isEnabledFor(logging.DEBUG):
+                    log_exception('')                
+                debug("End exception report.")
             except requests.exceptions.ConnectionError as e:
                 warn("unexpected connection error fetching md5 data for {}".format(d.name) + " This error may be temporary. Please retry in 24 hours.")
-                warn("The handled exception was:")
-                log_exception('')
-                warn("End exception report.")
+                debug("The handled exception was:")
+                if rootLogger.isEnabledFor(logging.DEBUG):
+                    log_exception('')                
+                debug("End exception report.")
             except requests.exceptions.ContentDecodingError as e:
                 warn("unexpected content decoding error fetching md5 data for {}".format(d.name) + " This error may be temporary. Please retry in 24 hours.")
-                warn("The handled exception was:")
-                log_exception('')
-                warn("End exception report.")
+                debug("The handled exception was:")
+                if rootLogger.isEnabledFor(logging.DEBUG):
+                    log_exception('')                
+                debug("End exception report.")
 
 def filter_downloads(out_list, downloads_list, lang_list, os_list,updateSession):
     """filters any downloads information against matching lang and os, translates
@@ -898,17 +925,18 @@ def is_numeric_id(s):
 
 def append_xml_extension_to_url_path(url):
     parsed = urlparse(url)
-    return urlunparse(parsed._replace(path = parsed.path + ".xml"))
+    return urlunparse(parsed._replace(path = parsed.path + ".xml")).replace('%28','(').replace('%29',')') #Thanks to pasbeg
 
 def process_argv(argv):
     p1 = argparse.ArgumentParser(description='%s (%s)' % (__appname__, __url__), add_help=False)
     sp1 = p1.add_subparsers(help='command', dest='command', title='commands')
     sp1.required = True
 
-    g1 = sp1.add_parser('login', help='Login to GOG and save a local copy of your authenticated cookie')
+    g1 = sp1.add_parser('login', help='Login to GOG and save a local copy of your authenticated token')
     g1.add_argument('username', action='store', help='GOG username/email', nargs='?', default=None)
     g1.add_argument('password', action='store', help='GOG password', nargs='?', default=None)
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
     
 
     g1 = sp1.add_parser('update', help='Update locally saved game manifest from GOG server')
@@ -933,6 +961,7 @@ def process_argv(argv):
     g1.add_argument('-wait', action='store', type=float,
                     help='wait this long in hours before starting', default=0.0)  # sleep in hr
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
                     
 
     g1 = sp1.add_parser('download', help='Download all your GOG games and extra files')    
@@ -960,6 +989,7 @@ def process_argv(argv):
     g5.add_argument('-lang', action='store', help='download game files only for language(s)', nargs='*', default=[])    
     g5.add_argument('-skiplang', action='store', help='skip downloading game files for language(s)', nargs='*', default=[])  
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
 
                     
                     
@@ -977,6 +1007,7 @@ def process_argv(argv):
     #g4.add_argument('-skipextras', action='store_true', help='skip downloading of any GOG extra files')
     #g4.add_argument('-skipgames', action='store_true', help='skip downloading of any GOG game files (deprecated, use -skipgalaxy -skipstandalone -skipshared instead)')
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
     g1.add_argument('-skipgalaxy', action='store_true', help='skip downloading Galaxy installers')
     g1.add_argument('-skipstandalone', action='store_true', help='skip downloading standlone installers')
     g1.add_argument('-skipshared', action = 'store_true', help ='skip downloading installers shared between Galaxy and standalone')
@@ -1004,6 +1035,8 @@ def process_argv(argv):
     g1.add_argument('-skipstandalone',action='store_true', help='skip backup of any GOG standalone installer files')
     g1.add_argument('-skipshared',action='store_true',help ='skip backup of any installers included in both the GOG Galalaxy and Standalone sets')
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
+
 
     g1 = sp1.add_parser('verify', help='Scan your downloaded GOG files and verify their size, MD5, and zip integrity')
     g1.add_argument('gamedir', action='store', help='directory containing games to verify', nargs='?', default='.')
@@ -1032,11 +1065,14 @@ def process_argv(argv):
     g1.add_argument('-skipstandalone',action='store_true', help='skip verification of any GOG standalone installer files')
     g1.add_argument('-skipshared',action='store_true',help ='skip verification of any installers included in both the GOG Galalaxy and Standalone sets')
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
+
 
     g1 = sp1.add_parser('clean', help='Clean your games directory of files not known by manifest')
     g1.add_argument('cleandir', action='store', help='root directory containing gog games to be cleaned')
     g1.add_argument('-dryrun', action='store_true', help='do not move files, only display what would be cleaned')
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
 
 
     g1 = sp1.add_parser('trash', help='Parmanently remove orphaned files in your game directory')
@@ -1044,6 +1080,7 @@ def process_argv(argv):
     g1.add_argument('-dryrun', action='store_true', help='do not move files, only display what would be trashed')
     g1.add_argument('-installersonly', action='store_true', help='only delete file types used as installers')
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
     
     
 
@@ -1057,6 +1094,9 @@ def process_argv(argv):
     
     if not args.nolog:
         rootLogger.addHandler(loggingHandler)
+        
+    if not args.debug:     
+        rootLogger.setLevel(logging.INFO)
 
     if args.command == 'update' or args.command == 'download' or args.command == 'backup' or args.command == 'import' or args.command == 'verify':
         for lang in args.lang+args.skiplang:  # validate the language
@@ -1213,11 +1253,11 @@ def save_token(token):
 def load_token(filepath=TOKEN_FILENAME):
     info('loading token...')
     try:
-        with codecs.open(filepath, 'rU', 'utf-8') as r:
+        with codecs.open(filepath, 'r' + universalLineEnd, 'utf-8') as r:
             ad = r.read().replace('{', 'AttrDict(**{').replace('}', '})')
         return eval(ad)
     except IOError:
-        return []
+        return {}
         
 
 def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,skipHidden,installers,resumemode,strict):
@@ -2423,7 +2463,7 @@ def cmd_verify(gamedir, skipextras, skipids,  check_md5, check_filesize, check_z
                     dest_dir = os.path.join(orphan_root_dir, game.title)
                     if not os.path.isdir(dest_dir):
                         os.makedirs(dest_dir)
-                    shutil.move(itm_file, dest_dir)
+                    move_with_increment_on_clash(itm_file, os.path.join(dest_dir,itm.name))
                 old_verify = itm.prev_verified    
                 if not fail:
                     itm.prev_verified= True;
@@ -2520,7 +2560,7 @@ def cmd_clean(cleandir, dryrun):
                 have_cleaned = True
                 total_size += get_total_size(cur_fulldir)
                 if not dryrun:
-                    shutil.move(cur_fulldir, orphan_root_dir)
+                    move_with_increment_on_clash(cur_fulldir, os.path.join(orphan_root_dir,cur_dir))
             else:
                 # dir is valid game folder, check its files
                 expected_filenames = []
@@ -2539,7 +2579,7 @@ def cmd_clean(cleandir, dryrun):
                         if not dryrun:
                             try:
                                 file_size = os.path.getsize(file_to_move)
-                                shutil.move(file_to_move, dest_dir)
+                                move_with_increment_on_clash(file_to_move, os.path.join(dest_dir,cur_dir_file))
                                 have_cleaned = True
                                 total_size += file_size                                
                             except Exception as e:
