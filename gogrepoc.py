@@ -177,6 +177,11 @@ if (sys.version_info[0] >= 3):
     universalLineEnd = ''
 else:
     universalLineEnd = 'U'
+if (sys.version_info[0] == 3 and sys.version_info[1] >= 8) or sys.version_info[0] >= 4 :
+    storeExtend = 'extend'
+else:
+    storeExtend = 'store'
+
 
 
 
@@ -943,10 +948,10 @@ def process_argv(argv):
     g1.add_argument('-resumemode',action="store",choices=['noresume','resume','onlyresume'],default='resume',help="how to handle resuming if necessary")
     g1.add_argument('-strictverify',action="store_true",help="clear previously verified unless md5 match")
     g2 = g1.add_mutually_exclusive_group()
-    g2.add_argument('-os', action='extend', help='operating system(s)', nargs='*', default=[])
+    g2.add_argument('-os', action=storeExtend, help='operating system(s)', nargs='*', default=[])
     g2.add_argument('-skipos', action='store', help='skip operating system(s)', nargs='*', default=[])  
     g3 = g1.add_mutually_exclusive_group()
-    g3.add_argument('-lang', action='extend', help='game language(s)', nargs='*', default=[])
+    g3.add_argument('-lang', action=storeExtend, help='game language(s)', nargs='*', default=[])
     g3.add_argument('-skiplang', action='store', help='skip game language(s)', nargs='*', default=[])      
     g1.add_argument('-skiphidden',action='store_true',help='skip games marked as hidden')
     g1.add_argument('-installers', action='store', choices = ['standalone','both'], default = 'standalone',  help='GOG Installer type to use: standalone or both galaxy and standalone. Default: standalone (Deprecated)')    
@@ -984,9 +989,9 @@ def process_argv(argv):
                     help='limit downloads to this many MB (approximately)', default=None)  # sleep in hr
     g4 = g1.add_mutually_exclusive_group()  # below are mutually exclusive    
     g4.add_argument('-skipos', action='store', help='skip downloading game files for operating system(s)', nargs='*', default=[])  
-    g4.add_argument('-os', action='extend', help='download game files only for operating system(s)', nargs='*', default=[]) 
+    g4.add_argument('-os', action=storeExtend, help='download game files only for operating system(s)', nargs='*', default=[]) 
     g5 = g1.add_mutually_exclusive_group()  # below are mutually exclusive    
-    g5.add_argument('-lang', action='extend', help='download game files only for language(s)', nargs='*', default=[])    
+    g5.add_argument('-lang', action=storeExtend, help='download game files only for language(s)', nargs='*', default=[])    
     g5.add_argument('-skiplang', action='store', help='skip downloading game files for language(s)', nargs='*', default=[])  
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
     g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
