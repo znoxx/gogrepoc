@@ -134,12 +134,12 @@ GOG_MEDIA_TYPE_MOVIE = '2'
 
 # HTTP request settings
 HTTP_FETCH_DELAY = 1   # in seconds
-HTTP_RETRY_DELAY = 5   # in seconds
+HTTP_RETRY_DELAY = 5   # in seconds #If you reduce this such that the wait between the first and third try is less than 10 seconds, you're gonna have a bad time with the 503 error. 
 HTTP_RETRY_COUNT = 3
 HTTP_TIMEOUT = 60
 
 HTTP_GAME_DOWNLOADER_THREADS = 4
-HTTP_PERM_ERRORCODES = (404, 403, 503)
+HTTP_PERM_ERRORCODES = (404, 403) #503 was in here GOG uses it as a request to wait for a bit when it's under stress. The time out appears to be ~10 seconds in such cases.  
 USER_AGENT = 'GOGRepoC/' + str(__version__)
 
 # Language table that maps two letter language to their unicode gogapi json name
@@ -213,8 +213,9 @@ INSTALLERS_EXT = ['.exe','.bin','.dmg','.pkg','.sh']
 
 ORPHAN_DIR_NAME = '!orphaned'
 DOWNLOADING_DIR_NAME = '!downloading'
+IMAGES_DIR_NAME = '!images'
 
-ORPHAN_DIR_EXCLUDE_LIST = [ORPHAN_DIR_NAME,DOWNLOADING_DIR_NAME, '!misc']
+ORPHAN_DIR_EXCLUDE_LIST = [ORPHAN_DIR_NAME,DOWNLOADING_DIR_NAME,IMAGES_DIR_NAME, '!misc']
 ORPHAN_FILE_EXCLUDE_LIST = [INFO_FILENAME, SERIAL_FILENAME]
 RESUME_SAVE_THRESHOLD = 50
 
@@ -982,6 +983,8 @@ def process_argv(argv):
     g3.add_argument('-ids', action='store', help='id(s) or title(s) of the game in the manifest to download', nargs='*', default=[])
     g3.add_argument('-skipids', action='store', help='id(s) or title(s) of the game(s) in the manifest to NOT download', nargs='*', default=[])
     g3.add_argument('-id', action='store', help='(deprecated) id or title of the game in the manifest to download')
+    g1.add_argument('-covers', action='store_true', help='downloads cover images for each game')
+    g1.add_argument('-backgrounds', action='store_true', help='downloads background images for each game')
     g1.add_argument('-skipfiles', action='store', help='file name (or glob patterns) to NOT download', nargs='*', default=[])
     g1.add_argument('-wait', action='store', type=float,
                     help='wait this long in hours before starting', default=0.0)  # sleep in hr
@@ -1079,8 +1082,14 @@ def process_argv(argv):
     g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
     g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
 
+    g1 = sp1.add_parser('clear_partial_downloads', help='Permanently remove all partially downloaded files from your game directory')
+    g1.add_argument('gamedir', action='store', help='root directory containing gog games')
+    g1.add_argument('-dryrun', action='store_true', help='do not move files, only display what would be cleaned')
+    g1.add_argument('-nolog', action='store_true', help = 'doesn\'t writes log file gogrepo.log')
+    g1.add_argument('-debug', action='store_true', help = "Includes debug messages")
 
-    g1 = sp1.add_parser('trash', help='Parmanently remove orphaned files in your game directory')
+
+    g1 = sp1.add_parser('trash', help='Permanently remove orphaned files in your game directory')
     g1.add_argument('gamedir', action='store', help='root directory containing gog games')
     g1.add_argument('-dryrun', action='store_true', help='do not move files, only display what would be trashed')
     g1.add_argument('-installersonly', action='store_true', help='only delete file types used as installers')
@@ -1238,8 +1247,8 @@ def makeGOGSession(loginSession=False):
         gogSession.token = load_token()
         try:
             gogSession.headers={'User-Agent':USER_AGENT,'Authorization':'Bearer ' + gogSession.token['access_token']}    
-        except AttributeError: 
-            error('failed to find token (did you log in?)')
+        except (KeyError, AttributeError): 
+            error('failed to find valid token (Please login and retry)')
             sys.exit(1)
     return gogSession
 
@@ -1625,11 +1634,15 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
             shutil.copy(f, dest_file)
 
 
-def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,skipgalaxy,skipstandalone,skipshared, skipfiles,downloadLimit = None):
+def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,skipgalaxy,skipstandalone,skipshared, skipfiles,covers,backgrounds,downloadLimit = None):
     sizes, rates, errors = {}, {}, {}
     work = Queue()  # build a list of work items
 
+    if not dryrun:
+        downloadSession = makeGOGSession()    
+
     items = load_manifest()
+    all_items = items
     work_dict = dict()
 
     # util
@@ -1668,11 +1681,11 @@ def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,ski
 
     handle_game_renames(savedir,items,dryrun)
     
-    items_by_title = {}    
+    all_items_by_title = {}    
 
     # make convenient dict with title/dirname as key
-    for item in items:
-        items_by_title[item.title] = item
+    for item in all_items:
+        all_items_by_title[item.title] = item
         
     downloadingdir = os.path.join(savedir, DOWNLOADING_DIR_NAME)    
     
@@ -1681,15 +1694,15 @@ def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,ski
         for cur_dir in sorted(os.listdir(downloadingdir)):
             cur_fulldir = os.path.join(downloadingdir, cur_dir)
             if os.path.isdir(cur_fulldir):
-                if cur_dir not in items_by_title:
+                if cur_dir not in all_items_by_title:
                     #ToDo: Maybe try to rename ? Content file names will probably change when renamed (and can't be recognised by md5s as partial downloads) so maybe not wortwhile ?     
-                    info("Removing outdate directory " + cur_fulldir)
+                    info("Removing outdated directory " + cur_fulldir)
                     if not dryrun:
                         shutil.rmtree(cur_fulldir)                
                 else:
                     # dir is valid game folder, check its files
                     expected_filenames = []
-                    for game_item in items_by_title[cur_dir].downloads + items_by_title[cur_dir].galaxyDownloads + items_by_title[cur_dir].sharedDownloads + items_by_title[cur_dir].extras:
+                    for game_item in all_items_by_title[cur_dir].downloads + all_items_by_title[cur_dir].galaxyDownloads +all_items_by_title[cur_dir].sharedDownloads + all_items_by_title[cur_dir].extras:
                         expected_filenames.append(game_item.name)
                     for cur_dir_file in os.listdir(cur_fulldir):
                         if os.path.isdir(os.path.join(downloadingdir, cur_dir, cur_dir_file)):
@@ -1817,6 +1830,53 @@ def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,ski
                     item.serial = item.serial.replace(u'</span>', os.linesep)
                     fd_serial.write(item.serial)
 
+        
+        def download_image_from_item_key(item,key,images_dir_name):
+            images_key_dir_name = os.path.join(images_dir_name,key)
+            if not os.path.exists(images_key_dir_name):                    
+                os.makedirs(images_key_dir_name)
+            key_local_path = item[key].lstrip("/") + ".jpg"
+            key_url = 'https://' + key_local_path
+            (dir,file) = os.path.split(key_local_path)
+            key_local_path_dir = os.path.join(images_key_dir_name,dir) 
+            key_local_path_file = os.path.join(key_local_path_dir,file) 
+            if not os.path.exists(key_local_path_file):
+                if os.path.exists(images_key_dir_name):
+                    try:
+                        shutil.rmtree(images_key_dir_name)
+                    except:
+                        error("Could not delete potential old image files, aborting update attempt. Please make sure folder and files are writeable and that nothing is accessing the !image folder")
+                        raise
+                os.makedirs(images_key_dir_name)
+                os.makedirs(key_local_path_dir)
+                response = request(downloadSession,key_url)
+                with open(key_local_path_file,"wb") as out:
+                    out.write(response.content)
+
+
+        #Download images
+        if not dryrun:
+            images_dir_name = os.path.join(item_homedir, IMAGES_DIR_NAME)
+            if not os.path.exists(images_dir_name):
+                os.makedirs(images_dir_name)
+            if item.bg_url != '' and backgrounds:
+                try:
+                    download_image_from_item_key(item,"bg_url",images_dir_name)
+                except KeyboardInterrupt:
+                    warn("Interrupted during download of background image")
+                    raise
+                except:
+                    warn("Could not download background image")
+                
+            if item.image_url != '' and covers:
+                try:
+                    download_image_from_item_key(item,"image_url",images_dir_name)
+                except KeyboardInterrupt:
+                    warn("Interrupted during download of cover image")
+                    raise
+                except:
+                    warn("Could not download cover image")
+
         # Populate queue with all files to be downloaded
         for game_item in item.downloads + item.galaxyDownloads + item.sharedDownloads + item.extras:
             if game_item.name is None:
@@ -1862,7 +1922,6 @@ def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,ski
         info("nothing to download")
         return
     
-    downloadSession = makeGOGSession()    
     downloading_root_dir = os.path.join(savedir, DOWNLOADING_DIR_NAME)
     if not os.path.isdir(downloading_root_dir):
         os.makedirs(downloading_root_dir)
@@ -2536,7 +2595,17 @@ def cmd_trash(cleandir,installersonly,dryrun):
                 except OSError:
                     pass
                 
-        
+def cmd_clear_partial_downloads(cleandir,dryrun):        
+    downloading_root_dir = os.path.join(cleandir, DOWNLOADING_DIR_NAME)
+    for dir in os.listdir(downloading_root_dir):
+        testdir= os.path.join(downloading_root_dir,dir)
+        if os.path.isdir(testdir):
+            try:
+                if (not dryrun):
+                    shutil.rmtree(testdir)
+                info("Deleting " + testdir)
+            except Exception:
+                error("Failed to delete directory: " + testdir)
 
 def cmd_clean(cleandir, dryrun):
     items = load_manifest()
@@ -2695,7 +2764,7 @@ def main(args):
             time.sleep(args.wait * 60 * 60)
         if args.downloadlimit is not None:
             args.downloadlimit = args.downloadlimit*1024.0*1024.0 #Convert to Bytes
-        cmd_download(args.savedir, args.skipextras, args.skipids, args.dryrun, args.ids,args.os,args.lang,args.skipgalaxy,args.skipstandalone,args.skipshared, args.skipfiles,args.downloadlimit)
+        cmd_download(args.savedir, args.skipextras, args.skipids, args.dryrun, args.ids,args.os,args.lang,args.skipgalaxy,args.skipstandalone,args.skipshared, args.skipfiles,args.covers,args.backgrounds,args.downloadlimit)
     elif args.command == 'import':
         #Hardcode these as false since extras currently do not have MD5s as such skipgames would give nothing and skipextras would change nothing. The logic path and arguments are present in case this changes, though commented out in the case of arguments)
         args.skipgames = False
@@ -2752,6 +2821,8 @@ def main(args):
             args.skipgalaxy = True
             args.skipshared = True
         cmd_backup(args.src_dir, args.dest_dir,args.skipextras,args.os,args.lang,args.ids,args.skipids,args.skipgalaxy,args.skipstandalone,args.skipshared)
+    elif args.command == 'clear_partial_downloads':
+        cmd_clear_partial_downloads(args.gamedir,args.dryrun)
     elif args.command == 'clean':
         cmd_clean(args.cleandir, args.dryrun)
     elif args.command == "trash":
