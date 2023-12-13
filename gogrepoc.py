@@ -85,11 +85,13 @@ FILE_BEGIN = 0x0
 
 # lib mods
 # configure logging
+LOG_MAX_MB = 180
+LOG_BACKUPS = 9 
 logFormatter = logging.Formatter("%(asctime)s | %(message)s", datefmt='%H:%M:%S')
 rootLogger = logging.getLogger('ws')
 rootLogger.setLevel(logging.DEBUG)
 consoleHandler = logging.StreamHandler(sys.stdout)
-loggingHandler = logging.handlers.RotatingFileHandler('gogrepo.log', mode='a+', maxBytes = 10485760*3 , backupCount = 10,  encoding=None, delay=True)
+loggingHandler = logging.handlers.RotatingFileHandler('gogrepo.log', mode='a+', maxBytes = 1024*1024*LOG_MAX_MB , backupCount = LOG_BACKUPS,  encoding=None, delay=True)
 loggingHandler.setFormatter(logFormatter)
 consoleHandler.setFormatter(logFormatter)
 rootLogger.addHandler(consoleHandler)
@@ -207,7 +209,11 @@ DEFAULT_LANG_LIST = [sysLang]
 #    DEFAULT_LANG_LIST.push(DEFAULT_FALLBACK_LANG)
 
 # These file types don't have md5 data from GOG
-SKIP_MD5_FILE_EXT = ['.txt', '.zip','.tar.gz','']
+SKIP_MD5_FILE_EXT = ['.txt', '.zip',''] #Removed tar.gz as it can have md5s and is actually parsed as .gz so wasn't working
+for i in range(1,21):
+    n = i
+    a = "." + f'{n:03}'
+    SKIP_MD5_FILE_EXT.append(a)
 INSTALLERS_EXT = ['.exe','.bin','.dmg','.pkg','.sh']
 
 
@@ -341,11 +347,16 @@ class ConditionalWriter(object):
                     tmp.seek(0)
                     shutil.copyfileobj(tmp, overwrite)
 
+def path_preserving_split_ext(path):
+    path_without_extensions = os.path.join(os.path.dirname(path),os.path.basename(path).rsplit(os.extsep,1)[0]) #Need to improve this to handle eg tar.gz
+    extension = os.extsep + os.path.basename(path).rsplit(os.extsep,1)[1]
+    return [path_without_extensions,extension]
+
 def move_with_increment_on_clash(src,dst,count=0):
     if (count == 0):
         potDst = dst
     else:
-        root,ext = os.path.splitext(dst)
+        root,ext = path_preserving_split_ext(dst)
         if (ext != ".bin"):
             potDst = root + "("+str(count) + ")" + ext
         else:
@@ -567,20 +578,28 @@ def handle_game_renames(savedir,gamesdb,dryrun):
             _ = game.old_title 
         except AttributeError:
             game.old_title = None
-        if (game.old_title is not None):
-            src_dir = os.path.join(savedir, game.old_title)
-            dst_dir = os.path.join(savedir, game.title)   
+        try: 
+            _ = game.folder_name 
+        except AttributeError:
+            game.folder_name = game.title
+        try: 
+            _ = game.old_folder_name 
+        except AttributeError:
+            game.old_folder_name = game.old_title
+        if (game.old_folder_name is not None):
+            src_dir = os.path.join(savedir, game.old_folder_name)
+            dst_dir = os.path.join(savedir, game.folder_name)   
             if os.path.isdir(src_dir):
                 try:
                     if os.path.exists(dst_dir):
                         warn("orphaning destination clash '{}'".format(dst_dir))
                         if not dryrun:
-                            move_with_increment_on_clash(dst_dir, os.path.join(orphan_root_dir,game.title))
+                            move_with_increment_on_clash(dst_dir, os.path.join(orphan_root_dir,game.folder_name))
                     info('  -> renaming directory "{}" -> "{}"'.format(src_dir, dst_dir))            
                     if not dryrun:                    
                         move_with_increment_on_clash(src_dir,dst_dir)
                 except Exception: 
-                    error('    -> rename failed "{}" -> "{}"'.format(game.old_title, game.title))
+                    error('    -> rename failed "{}" -> "{}"'.format(game.old_folder_name, game.folder_name))
         for item in game.downloads+game.galaxyDownloads+game.sharedDownloads+game.extras:
             try: 
                 _ = item.old_name 
@@ -588,14 +607,14 @@ def handle_game_renames(savedir,gamesdb,dryrun):
                 item.old_name = None
         
             if (item.old_name is not None):            
-                game_dir =  os.path.join(savedir, game.title)
+                game_dir =  os.path.join(savedir, game.folder_name)
                 src_file =  os.path.join(game_dir,item.old_name)
                 dst_file =  os.path.join(game_dir,item.name)
                 if os.path.isfile(src_file):
                     try:
                         if os.path.exists(dst_file):
                             warn("orphaning destination clash '{}'".format(dst_file))
-                            dest_dir = os.path.join(orphan_root_dir, game.title)
+                            dest_dir = os.path.join(orphan_root_dir, game.folder_name)
                             if not os.path.isdir(dest_dir):
                                 if not dryrun:
                                     os.makedirs(dest_dir)
@@ -604,6 +623,7 @@ def handle_game_renames(savedir,gamesdb,dryrun):
                         info('  -> renaming file "{}" -> "{}"'.format(src_file, dst_file))
                         if not dryrun:
                             move_with_increment_on_clash(src_file,dst_file)
+                            item.old_name = None #only once
                     except Exception:
                         error('    -> rename failed "{}" -> "{}"'.format(src_file, dst_file))
                         if not dryrun:
@@ -621,6 +641,10 @@ def handle_game_updates(olditem, newitem,strict):
         a = olditem.sharedDownloads
     except AttributeError:
         olditem.sharedDownloads = []
+    try:
+        a = olditem.folder_name
+    except AttributeError:
+        olditem.folder_name = olditem.title
 
 
     if newitem.has_updates:
@@ -629,6 +653,10 @@ def handle_game_updates(olditem, newitem,strict):
     if olditem.title != newitem.title:
         info('  -> title has changed "{}" -> "{}"'.format(olditem.title, newitem.title))
         newitem.old_title = olditem.title
+
+    if olditem.folder_name != newitem.folder_name:
+        info('  -> folder name has changed "{}" -> "{}"'.format(olditem.folder_name, newitem.folder_name))
+        newitem.old_folder_name = olditem.folder_name
 
     if olditem.long_title != newitem.long_title:
         try:
@@ -643,17 +671,16 @@ def handle_game_updates(olditem, newitem,strict):
         info('  -> serial key has changed')
                 
     #Done this way for backwards compatability. Would be faster to do each separately.     
-    for oldDownload in olditem.downloads+olditem.galaxyDownloads+olditem.sharedDownloads:
-        for newDownload in newitem.downloads+newitem.galaxyDownloads+newitem.sharedDownloads:
+    for newDownload in newitem.downloads+newitem.galaxyDownloads+newitem.sharedDownloads:
+        candidate = None
+        for oldDownload in olditem.downloads+olditem.galaxyDownloads+olditem.sharedDownloads:
             if oldDownload.md5 is not None:
                 if oldDownload.md5 == newDownload.md5 and oldDownload.size == newDownload.size and oldDownload.lang == newDownload.lang:
-                        try:
-                            newDownload.prev_verified = oldDownload.prev_verified         
-                        except AttributeError:
-                            newDownload.prev_verified = False
-                        if oldDownload.name != newDownload.name:
-                            info('  -> in title "{}" a download has changed name "{}" -> "{}"'.format(newitem.title,oldDownload.name,newDownload.name))
-                            newDownload.old_name = oldDownload.name
+                    if oldDownload.name == newDownload.name:
+                        candidate = oldDownload #Match already exists
+                        break #Can't be overriden so end it now
+                    if oldDownload.name != newDownload.name and candidate == None: #Will not override and gets overridden by a perfect match (also allows only one match)
+                         candidate = oldDownload
             else:            
                 if oldDownload.size == newDownload.size and oldDownload.name == newDownload.name:
                     if not strict:
@@ -661,17 +688,24 @@ def handle_game_updates(olditem, newitem,strict):
                             newDownload.prev_verified = oldDownload.prev_verified         
                         except AttributeError:
                             newDownload.prev_verified = False
-    for oldExtra in olditem.extras:                    
-        for newExtra in newitem.extras:
+        if candidate != None:
+            try:
+                newDownload.prev_verified = candidate.prev_verified         
+            except AttributeError:
+                newDownload.prev_verified = False
+            if candidate.name != newDownload.name:
+                info('  -> in folder_name "{}" a download has changed name "{}" -> "{}"'.format(newitem.folder_name,candidate.name,newDownload.name))
+                newDownload.old_name  = candidate.name
+    for newExtra in newitem.extras: 
+        candidate = None
+        for oldExtra in olditem.extras:                    
             if (oldExtra.md5 != None):                
                 if oldExtra.md5 == oldExtra.md5 and oldExtra.size == newExtra.size:
+                    if oldExtra.name == neExtra.name:
+                        candidate = oldExtra #Match already exists
+                        break #Can't be overriden so end it now
                     if oldExtra.name != newExtra.name:
-                        try:
-                            newExtra.prev_verified = oldExtra.prev_verified
-                        except AttributeError:
-                            newExtra.prev_verified = False
-                        info('  -> in title "{}" an extra has changed name "{}" -> "{}"'.format(newitem.title,oldExtra.name,newExtra.name))
-                        newExtra.old_name = oldExtra.name
+                        candidate = oldExtra
             else:    
                 if oldExtra.name == newExtra.name and oldExtra.size == newExtra.size:
                     if not strict:
@@ -679,6 +713,15 @@ def handle_game_updates(olditem, newitem,strict):
                             newExtra.prev_verified = oldExtra.prev_verified
                         except AttributeError:
                             newExtra.prev_verified = False
+        if candidate != None:
+            try:
+                newExtra.prev_verified = candidate.prev_verified         
+            except AttributeError:
+                newExtra.prev_verified = False
+            if candidate.name != newExtra.name:
+                info('  -> in folder_name "{}" an extra has changed name "{}" -> "{}"'.format(newitem.folder_name,candidate.name,newExtra.name))
+                newExtra.old_name  = candidate.name
+
 
 def fetch_chunk_tree(response, session):
     file_ext = os.path.splitext(urlparse(response.url).path)[1].lower()
@@ -722,7 +765,7 @@ def fetch_chunk_tree(response, session):
     return None
 
 def fetch_file_info(d, fetch_md5,updateSession):
-    # fetch file name/size
+   # fetch file name/size
     #try:
     response = request(updateSession,d.href,byte_range=(0, 0))
     #except ContentDecodingError as e:
@@ -767,6 +810,8 @@ def fetch_file_info(d, fetch_md5,updateSession):
                 if rootLogger.isEnabledFor(logging.DEBUG):
                     log_exception('')                
                 debug("End exception report.")
+        else:
+            d.md5_exempt = True
 
 def filter_downloads(out_list, downloads_list, lang_list, os_list,updateSession):
     """filters any downloads information against matching lang and os, translates
@@ -786,29 +831,80 @@ def filter_downloads(out_list, downloads_list, lang_list, os_list,updateSession)
             for os_type in downloads_dict[lang]:
                 if os_type in os_list:
                     for download in downloads_dict[lang][os_type]:
-                        # passed the filter, create the entry
-                        d = AttrDict(desc=download['name'],
-                                     os_type=os_type,
-                                     lang=lang,
-                                     version=download['version'],
-                                     href=GOG_HOME_URL + download['manualUrl'],
-                                     md5=None,
-                                     name=None,
-                                     size=None,
-                                     prev_verified=False,
-                                     old_name=None
-                                     )
-                        try:
-                            fetch_file_info(d, True,updateSession)
-                        except requests.HTTPError:
-                            warn("failed to fetch %s" % d.href)
-                        except Exception:
-                            warn("failed to fetch %s because of non-HTTP Error" % d.href)                            
-                            warn("The handled exception was:")
-                            log_exception('')
-                            warn("End exception report.")
-                        filtered_downloads.append(d)
-
+                        tempd = download['manualUrl']
+                        if tempd[:10] == "/downloads":
+                            tempd = "/downlink" +tempd[10:]
+                        hrefs = [GOG_HOME_URL + download['manualUrl'],GOG_HOME_URL + tempd]
+                        href_ds = []
+                        file_info_success = False
+                        md5_success = False
+                        unreleased = False
+                        for href in hrefs:
+                            if not (unreleased or (file_info_success and md5_success)):
+                                debug("trying to fetch file info from %s" % href)
+                                file_info_success = False
+                                md5_success = False
+                                # passed the filter, create the entry
+                                d = AttrDict(desc=download['name'],
+                                             os_type=os_type,
+                                             lang=lang,
+                                             version=download['version'],
+                                             href= href,
+                                             md5=None,
+                                             name=None,
+                                             size=None,
+                                             prev_verified=False,
+                                             old_name=None,
+                                             unreleased = False,
+                                             md5_exempt = False,
+                                             gog_data = AttrDict()
+                                             )
+                                for key in download:
+                                    try:
+                                        tmp_contents = d[key]
+                                        if tmp_contents != download[key]:
+                                            debug("GOG Data Key, %s , for download clashes with Download Data Key storing detailed info in secondary dict" % key)
+                                            d.gog_data[key] = download[key]
+                                    except:
+                                        d[key] = download[key]             
+                                if d.gog_data.size == "0 MB":#Not Available
+                                    warn("Unreleased File, Skipping Data Fetching %s" % d.desc)
+                                    d.unreleased = True
+                                    unreleased = True
+                                else: #Available
+                                    try:
+                                        fetch_file_info(d, True,updateSession)
+                                        file_info_success = True
+                                    except requests.HTTPError:
+                                        warn("failed to fetch %s" % (d.href))
+                                    except Exception:
+                                        warn("failed to fetch %s and because of non-HTTP Error" % (d.href))
+                                        warn("The handled exception was:")
+                                        log_exception('')
+                                        warn("End exception report.")
+                                    if d.md5_exempt == True or d.md5 != None:
+                                        md5_success = True
+  
+                                    
+                                href_ds.append([d,file_info_success,md5_success])
+                        if unreleased:
+                            debug("File Not Available For Manual Download Storing Canonical Link: %s" % d.href)
+                            filtered_downloads.append(d)
+                        elif file_info_success and md5_success: #Will be the current d because no more are created once we're successful
+                            debug("Successfully fetched file info and md5 from %s" % d.href)
+                            filtered_downloads.append(d)
+                        else: #Check for first file info success since all MD5s failed.
+                            any_file_info_success = False
+                            for href_d in href_ds:
+                                if not any_file_info_success:
+                                    if (href_d[1]) == True:
+                                        any_file_info_success = True
+                                        filtered_downloads.append(href_d[0])
+                                        warn("Successfully fetched file info from %s but no md5 data was available" % href_d[0].href)
+                            if not any_file_info_success:
+                                #None worked so go with the canonical link
+                                error("Could not fetch file info so using canonical link: %s" % href_ds[0][0].href)
+                                filtered_downloads.append(href_ds[0][0])
     out_list.extend(filtered_downloads)
 
 
@@ -818,28 +914,64 @@ def filter_extras(out_list, extras_list,updateSession):
     filtered_extras = []
 
     for extra in extras_list:
-        d = AttrDict(desc=extra['name'],
-                     os_type='extra',
-                     lang='',
-                     version=None,
-                     href=GOG_HOME_URL + extra['manualUrl'],
-                     md5=None,
-                     name=None,
-                     size=None,
-                     prev_verified=False,
-                     old_name = None
-                     )
-        try:
-            fetch_file_info(d, False,updateSession)
-        except requests.HTTPError:
-            warn("failed to fetch %s" % d.href)
-        except Exception:
-            warn("failed to fetch %s because of non-HTTP Error" % d.href)                            
-            warn("The handled exception was:")
-            log_exception('')
-            warn("End exception report.")
-        filtered_extras.append(d)
-
+        tempd = extra['manualUrl']
+        if tempd[:10] == "/downloads":
+            tempd = "/downlink" +tempd[10:]
+        hrefs = [GOG_HOME_URL + extra['manualUrl'],GOG_HOME_URL + tempd]
+        href_ds = []
+        file_info_success = False
+        unreleased = False
+        for href in hrefs:
+            if not (unreleased or file_info_success):
+                debug("trying to fetch file info from %s" % href)
+                file_info_success = False
+                d = AttrDict(desc=extra['name'],
+                             os_type='extra',
+                             lang='',
+                             version=None,
+                             href= href,
+                             md5=None,
+                             name=None,
+                             size=None,
+                             prev_verified=False,
+                             old_name = None,
+                             unreleased = False,
+                             gog_data = AttrDict()
+                             )
+                for key in extra:
+                    try:
+                        tmp_contents = d[key]
+                        if tmp_contents != extra[key]:
+                            debug("GOG Data Key, %s , for extra clashes with Extra Data Key storing detailed info in secondary dict" % key)
+                            d.gog_data[key] = extra[key]
+                    except:
+                        d[key] = extra[key]
+                if d.gog_data.size == "0 MB":#Not Available
+                    debug("Unreleased File, Skipping Data Fetching %s" % d.desc)
+                    d.unreleased = True
+                    unreleased = True
+                else:
+                    try:
+                        fetch_file_info(d, False,updateSession)
+                        file_info_success = True
+                    except requests.HTTPError:
+                        warn("failed to fetch %s" % d.href)
+                    except Exception:
+                        warn("failed to fetch %s because of non-HTTP Error" % d.href)
+                        warn("The handled exception was:")
+                        log_exception('')
+                        warn("End exception report.")
+                href_ds.append([d,file_info_success])
+        if unreleased:
+            debug("File Not Available For Manual Download Storing Canonical Link: %s" % d.href)
+            filtered_extras.append(d)
+        elif file_info_success: #Will be the current d because no more are created once we're successful
+            debug("Successfully fetched file info from %s" % d.href)
+            filtered_extras.append(d)
+        else:
+            #None worked so go with the canonical link
+            error("Could not fetch file info so using canonical link: %s" % href_ds[0][0].href)
+            filtered_extras.append(href_ds[0][0])
     out_list.extend(filtered_extras)
 
 
@@ -855,12 +987,12 @@ def filter_dlcs(item, dlc_list, lang_list, os_list,updateSession):
         filter_extras(item.extras, dlc_dict['extras'],updateSession)
         filter_dlcs(item, dlc_dict['dlcs'], lang_list, os_list,updateSession)  # recursive
         
-def deDuplicateList(duplicatedList,existingItems):   
+def deDuplicateList(duplicatedList,existingItems,strictDupe):   
     deDuplicatedList = []
     for update_item in duplicatedList:
         if update_item.name is not None:                
             dummy_item = copy.copy(update_item)
-            deDuplicatedName = deDuplicateName(dummy_item,existingItems)
+            deDuplicatedName = deDuplicateName(dummy_item,existingItems,strictDupe)
             if deDuplicatedName is not None:
                 if (update_item.name != deDuplicatedName):
                     info('  -> ' + update_item.name + ' already exists in this game entry with a different size and/or md5, this file renamed to ' + deDuplicatedName)                        
@@ -874,37 +1006,56 @@ def deDuplicateList(duplicatedList,existingItems):
     return deDuplicatedList        
         
         
-def deDuplicateName(potentialItem,clashDict):
+def deDuplicateName(potentialItem,clashDict,strictDupe):
     try: 
         #Check if Name Exists
-        existingList = clashDict[potentialItem.name] 
+        existingDict = clashDict[potentialItem.name] 
         try:
             #Check if this md5 / size pair have already been resolved
-            idx = existingList.index((potentialItem.md5,potentialItem.size))
+            prevItemsCount = 0
+            for key in existingDict:
+                prevItemsCount += len(existingDict[key]) 
+            md5list = existingDict[potentialItem.size]
+            try:
+                idx = md5list.index(potentialItem.md5)
+            except ValueError:
+                #Do this early, so we can abort early if need to rely on size match.
+                existingDict[potentialItem.size].append(potentialItem.md5) #Mark as resolved
+                if ((not strictDupe) and (None in md5list or potentialItem.md5 == None)):
+                    return None
+                else:
+                    potentialItem.name = makeDeDuplicateName(potentialItem.name,prevItemsCount)
+                    return deDuplicateName(potentialItem,clashDict,strictDupe)
             return None
-        except ValueError:
-            root,ext = os.path.splitext(potentialItem.name)
-            if (ext != ".bin"):
-                potentialItem.name = root + "("+str(len(existingList)) + ")" + ext
-            else:
-                #bin file, adjust name to account for gogs weird extension method
-                setDelimiter = root.rfind("-")
-                try:
-                    setPart = int(root[setDelimiter+1:])
-                except ValueError:
-                    #This indicators a false positive. The "-" found was part of the file name not a set delimiter. 
-                    setDelimiter = -1 
-                if (setDelimiter == -1):
-                    #not part of a bin file set , some other binary file , treat it like a non .bin file
-                    potentialItem.name = root + "("+str(len(existingList)) + ")" + ext
-                else:    
-                    potentialItem.name = root[:setDelimiter] + "("+str(len(existingList)) + ")" + root[setDelimiter:] + ext
-            existingList.append((potentialItem.md5,potentialItem.size)) #Mark as resolved 
-            return deDuplicateName(potentialItem,clashDict)        
+        except KeyError:
+            potentialItem.name = makeDeDuplicateName(potentialItem.name,prevItemsCount)
+            existingDict[potentialItem.size] = [potentialItem.md5] #Mark as resolved
+            return deDuplicateName(potentialItem,clashDict,strictDupe)
     except KeyError:
         #No Name Clash
-        clashDict[potentialItem.name] = [(potentialItem.md5,potentialItem.size)]
-        return potentialItem.name   
+        clashDict[potentialItem.name] = {potentialItem.size:[potentialItem.md5]}
+        return potentialItem.name
+
+def makeDeDuplicateName(name,prevItemsCount):
+    root,ext = name.rsplit(os.extsep,1) #expand this to cover eg tar.zip
+    ext = os.extsep + ext
+    if (ext != ".bin"):
+        name = root + "("+str(prevItemsCount) + ")" + ext
+    else:
+        #bin file, adjust name to account for gogs weird extension method
+        setDelimiter = root.rfind("-")
+        try:
+            setPart = int(root[setDelimiter+1:])
+        except ValueError:
+            #This indicators a false positive. The "-" found was part of the file name not a set delimiter. 
+            setDelimiter = -1 
+        if (setDelimiter == -1):
+            #not part of a bin file set , some other binary file , treat it like a non .bin file
+           name = root + "("+str(prevItemsCount) + ")" + ext
+        else:    
+            name = root[:setDelimiter] + "("+str(prevItemsCount) + ")" + root[setDelimiter:] + ext
+    return name
+
 
 def check_skip_file(fname, skipfiles):
     # return pattern that matched, or None
@@ -948,6 +1099,7 @@ def process_argv(argv):
     g1 = sp1.add_parser('update', help='Update locally saved game manifest from GOG server')
     g1.add_argument('-resumemode',action="store",choices=['noresume','resume','onlyresume'],default='resume',help="how to handle resuming if necessary")
     g1.add_argument('-strictverify',action="store_true",help="clear previously verified unless md5 match")
+    g1.add_argument('-strictdupe',action="store_true",help="missing MD5s do not default to checking only file size (missing MD5s only match other missing MD5s rather than any value)")
     g2 = g1.add_mutually_exclusive_group()
     g2.add_argument('-os', action=storeExtend, help='operating system(s)', nargs='*', default=[])
     g2.add_argument('-skipos', action='store', help='skip operating system(s)', nargs='*', default=[])  
@@ -1274,7 +1426,7 @@ def load_token(filepath=TOKEN_FILENAME):
         return {}
         
 
-def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,skipHidden,installers,resumemode,strict):
+def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,skipHidden,installers,resumemode,strict,strictDupe):
     media_type = GOG_MEDIA_TYPE_GAME
     items = []
     known_ids = []
@@ -1317,6 +1469,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
         installers = resumeprops['installers']
         save_strict = strict
         strict = resumeprops['strict']
+        save_strictDupe = strictDupe
         try:
             partial = resumeprops['partial']
         except KeyError:
@@ -1329,6 +1482,10 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
             updateonly = resumeprops['updateonly']
         except KeyError:
             pass
+        try:
+            strictDupe = resumeprops['strictDupe']
+        except KeyError:
+            strictDupe = True
         items = resumedb
         items_count = len(items)
         print_padding = len(str(items_count))
@@ -1370,6 +1527,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                 item = AttrDict()
                 item.id = item_json_data['id']
                 item.title = item_json_data['slug']
+                item.folder_name = item_json_data['slug']
                 item.long_title = item_json_data['title']
                 item.genre = item_json_data['category']
                 item.image_url = item_json_data['image']
@@ -1378,6 +1536,15 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                 item.rating = item_json_data['rating']
                 item.has_updates = bool(item_json_data['updates'])
                 item.old_title = None
+                item.gog_data = AttrDict()
+                for key in item_json_data:
+                    try:
+                        tmp_contents = item[key]
+                        if tmp_contents != item_json_data[key]:
+                            debug("GOG Data Key, %s , for item clashes with Item Data Key storing detailed info in secondary dict" % key)
+                            item.gog_data[key] = item_json_data[key]
+                    except:
+                        item[key] = item_json_data[key]
                 
                 
                 if not done:
@@ -1469,7 +1636,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
     # fetch item details
     i = 0
     resumedb = sorted(items, key=lambda item: item.title)
-    resumeprop = {'os_list':os_list,'lang_list':lang_list,'installers':installers,'strict':strict,'complete':False,'skipknown':skipknown,'partial':partial,'updateonly':updateonly}
+    resumeprop = {'os_list':os_list,'lang_list':lang_list,'installers':installers,'strict':strict,'complete':False,'skipknown':skipknown,'partial':partial,'updateonly':updateonly,'strictDupe':strictDupe}
     resumedb.append(resumeprop)
     save_resume_manifest(resumedb)                    
     
@@ -1492,13 +1659,29 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
             item.serial = item_json_data['cdKey']
             item.forum_url = item_json_data['forumLink']
             item.changelog = item_json_data['changelog']
+            item.changelog_end = None
             item.release_timestamp = item_json_data['releaseTimestamp']
             item.gog_messages = item_json_data['messages']
             item.downloads = []
             item.galaxyDownloads = []
             item.sharedDownloads = []
             item.extras = []
-
+            item.detailed_gog_data = AttrDict()
+            for key in item_json_data:
+                if key not in ["downloads","extras","galaxyDownloads","dlcs"]: #DLCS lose some info in processing, need to fix that when extending.  #This data is going to be stored after filtering (#Consider storing languages / OSes in case new ones are added)
+                    try:
+                        tmp_contents = item[key]
+                        if tmp_contents != item_json_data[key]:
+                            debug("Detailed GOG Data Key, %s , for item clashes with Item Data Key attempting to store detailed info in secondary dict" % key)
+                            try:
+                                tmp_contents = item.gog_data[key]
+                                if tmp_contents != item_json_data[key]:
+                                    debug("GOG Data Key, %s  ,for item clashes with Item Secondary Data Key storing detailed info in tertiary dict" % key)
+                                    item.detailed_gog_data[key] = item_json_data[key]
+                            except:
+                                item.gog_data[key] = item_json_data[key]
+                    except:
+                        item[key] = item_json_data[key]
             # parse json data for downloads/extras/dlcs
             filter_downloads(item.downloads, item_json_data['downloads'], lang_list, os_list,updateSession)
             filter_downloads(item.galaxyDownloads, item_json_data['galaxyDownloads'], lang_list, os_list,updateSession)                
@@ -1507,8 +1690,8 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
             
             
             #Indepent Deduplication to make sure there are no doubles within galaxyDownloads or downloads to avoid weird stuff with the comprehention.
-            item.downloads = deDuplicateList(item.downloads,{})  
-            item.galaxyDownloads = deDuplicateList(item.galaxyDownloads,{}) 
+            item.downloads = deDuplicateList(item.downloads,{},strictDupe)  
+            item.galaxyDownloads = deDuplicateList(item.galaxyDownloads,{},strictDupe) 
             
             item.sharedDownloads = [x for x in item.downloads if x in item.galaxyDownloads]
             if (installers=='galaxy'):
@@ -1521,10 +1704,10 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
                 item.galaxyDownloads = [x for x in item.galaxyDownloads if x not in item.sharedDownloads]
                             
             existingItems = {}                
-            item.downloads = deDuplicateList(item.downloads,existingItems)  
-            item.galaxyDownloads = deDuplicateList(item.galaxyDownloads,existingItems) 
-            item.sharedDownloads = deDuplicateList(item.sharedDownloads,existingItems)                 
-            item.extras = deDuplicateList(item.extras,existingItems)
+            item.downloads = deDuplicateList(item.downloads,existingItems,strictDupe)  
+            item.galaxyDownloads = deDuplicateList(item.galaxyDownloads,existingItems,strictDupe) 
+            item.sharedDownloads = deDuplicateList(item.sharedDownloads,existingItems,strictDupe)                 
+            item.extras = deDuplicateList(item.extras,existingItems,strictDupe)
 
             # update gamesdb with new item
             item_idx = item_checkdb(item.id, gamesdb)
@@ -1542,6 +1725,21 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
             save_manifest(gamesdb)                
             save_resume_manifest(resumedb)                
 
+    global_dupes = []
+    sorted_gamesdb =  sorted(gamesdb, key = lambda game : game.title)
+    for game in sorted_gamesdb:
+        if game not in global_dupes:
+            index = sorted_gamesdb.index(game)
+            dupes = [game]
+            while (len(sorted_gamesdb)-1 >= index+1 and sorted_gamesdb[index+1].title == game.title):
+                dupes.append(sorted_gamesdb[index+1])
+                index = index + 1
+            if len(dupes) > 1:
+                global_dupes.extend(dupes)
+            
+    for dupe in global_dupes:
+        dupe.folder_name = dupe.title + "_" + dupe.id
+        
     # save the manifest to disk
     save_manifest(gamesdb)
     resumeprop['complete'] = True    
@@ -1550,7 +1748,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, partial, ids, skipids,
         info('resume completed')
         if (resumemode != 'onlyresume'):
             info('returning to specified download request...')
-            cmd_update(save_os_list, save_lang_list, save_skipknown, save_updateonly, save_partial, ids, skipids,skipHidden,save_installers,resumemode,save_strict)
+            cmd_update(save_os_list, save_lang_list, save_skipknown, save_updateonly, save_partial, ids, skipids,skipHidden,save_installers,resumemode,save_strict,save_strictDupe)
 
 
 def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipgalaxy,skipstandalone,skipshared):
@@ -1577,7 +1775,11 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
             a = game.sharedDownloads
         except AttributeError:
             game.sharedDownloads = []
-    
+
+        try:
+            _ = game.folder_name
+        except AttributeError:
+            game.folder_name = game.title
     
         if skipgalaxy:
             game.galaxyDownloads = []
@@ -1597,7 +1799,7 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
             if game_item.md5 is not None:
                 if game_item.lang in valid_langs:
                     if game_item.os_type in os_list:
-                        md5_info[game_item.md5] = (game.title, game_item.name)
+                        md5_info[game_item.md5] = (game.folder_name, game_item.name)
         #Note that Extras currently have unusual Lang / OS entries that are also accepted.  
         valid_langs_extras = valid_langs + [u'']
         valid_os_extras = os_list + [u'extra']
@@ -1605,13 +1807,13 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
             if extra_item.md5 is not None:
                 if extra_item.lang in valid_langs_extras:
                     if extra_item.os_type in valid_os_extras:            
-                        md5_info[extra_item.md5] = (game.title, extra_item.name)
+                        md5_info[extra_item.md5] = (game.folder_name, extra_item.name)
         
     info("searching for files within '%s'" % src_dir)
     file_list = []
     for (root, dirnames, filenames) in os.walk(src_dir):
         for f in filenames:
-            if os.path.splitext(f)[1].lower() not in SKIP_MD5_FILE_EXT:
+            if (os.extsep + f.rsplit(os.extsep,1)[1]).lower() not in SKIP_MD5_FILE_EXT: #Need to extend this to cover tar.gz too
                 file_list.append(os.path.join(root, f))
 
     info("comparing md5 file hashes")
@@ -1620,8 +1822,8 @@ def cmd_import(src_dir, dest_dir,os_list,lang_list,skipextras,skipids,ids,skipga
         info("calculating md5 for '%s'" % fname)
         h = hashfile(f)
         if h in md5_info:
-            title, fname = md5_info[h]
-            src_dir = os.path.join(dest_dir, title)
+            folder_name, fname = md5_info[h]
+            src_dir = os.path.join(dest_dir, folder_name)
             dest_file = os.path.join(src_dir, fname)
             info('found a match! [%s] -> %s' % (h, fname))
             if os.path.isfile(dest_file):
@@ -1685,7 +1887,11 @@ def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,ski
 
     # make convenient dict with title/dirname as key
     for item in all_items:
-        all_items_by_title[item.title] = item
+        try:
+            _ = item.folder_name 
+        except AttributeError:
+            item.folder_name = item.title
+        all_items_by_title[item.folder_name] = item
         
     downloadingdir = os.path.join(savedir, DOWNLOADING_DIR_NAME)    
     
@@ -1715,13 +1921,17 @@ def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,ski
                                 if not dryrun:
                                     os.remove(os.path.join(downloadingdir, cur_dir, cur_dir_file))
     
-    
+    for item in items:
+        try:
+            _ = item.folder_name 
+        except AttributeError:
+            item.folder_name = item.title
 
     # Find all items to be downloaded and push into work queue
-    for item in sorted(items, key=lambda g: g.title):
-        info("{%s}" % item.title)
-        item_homedir = os.path.join(savedir, item.title)
-        item_downloaddir = os.path.join(savedir, DOWNLOADING_DIR_NAME, item.title)
+    for item in sorted(items, key=lambda g: g.folder_name):
+        info("{%s}" % item.folder_name)
+        item_homedir = os.path.join(savedir, item.folder_name)
+        item_downloaddir = os.path.join(savedir, DOWNLOADING_DIR_NAME, item.folder_name)
         if not dryrun:
             if not os.path.isdir(item_homedir):
                 os.makedirs(item_homedir)
@@ -2264,9 +2474,15 @@ def cmd_download(savedir, skipextras,skipids, dryrun, ids,os_list, lang_list,ski
                     
 def cmd_backup(src_dir, dest_dir,skipextras,os_list,lang_list,ids,skipids,skipgalaxy,skipstandalone,skipshared):
     gamesdb = load_manifest()
+    
+    for game in games_db:
+        try:
+            _ = game.folder_name
+        except AttributeError:
+            game.folder_name = game.title
 
     info('finding all known files in the manifest')
-    for game in sorted(gamesdb, key=lambda g: g.title):
+    for game in sorted(gamesdb, key=lambda g: g.folder_name):
         touched = False
         
         try:
@@ -2328,9 +2544,9 @@ def cmd_backup(src_dir, dest_dir,skipextras,os_list,lang_list,ids,skipids,skipga
                 
                 
 
-            src_game_dir = os.path.join(src_dir, game.title)
+            src_game_dir = os.path.join(src_dir, game.folder_name)
             src_file = os.path.join(src_game_dir, itm.name)
-            dest_game_dir = os.path.join(dest_dir, game.title)
+            dest_game_dir = os.path.join(dest_dir, game.folder_name)
             dest_file = os.path.join(dest_game_dir, itm.name)
 
             if os.path.isfile(src_file):
@@ -2368,7 +2584,13 @@ def cmd_verify(gamedir, skipextras, skipids,  check_md5, check_filesize, check_z
     
     save_manifest_needed = False;
     
-    games_to_check_base = sorted(items, key=lambda g: g.title)
+    for item in items:
+        try:
+            _ = item.folder_name
+        except AttributeError:
+            item.folder_name = item.title
+    
+    games_to_check_base = sorted(items, key=lambda g: g.folder_name)
 
     if skipids:
         formattedSkipIds =  ', '.join(map(str, skipids))                
@@ -2486,8 +2708,8 @@ def cmd_verify(gamedir, skipextras, skipids,  check_md5, check_filesize, check_z
                 skip_cnt += 1
                 continue
 
-            itm_dirpath = os.path.join(game.title, itm.name)
-            itm_file = os.path.join(gamedir, game.title, itm.name)
+            itm_dirpath = os.path.join(game.folder_name, itm.name)
+            itm_file = os.path.join(gamedir, game.folder_name, itm.name)
 
             
 
@@ -2582,7 +2804,7 @@ def cmd_trash(cleandir,installersonly,dryrun):
                     error("Failed to delete directory: " + testdir)
             else: 
                 contents = os.listdir(testdir)
-                deletecontents = [x for x in contents if os.path.splitext(x)[1] in INSTALLERS_EXT]
+                deletecontents = [x for x in contents if (os.extsep + x.rsplit(os.extsep,1)[1]) in INSTALLERS_EXT]
                 for content in deletecontents:
                     contentpath = os.path.join(testdir,content)
                     if (not dryrun):
@@ -2616,7 +2838,11 @@ def cmd_clean(cleandir, dryrun):
 
     # make convenient dict with title/dirname as key
     for item in items:
-        items_by_title[item.title] = item
+        try:
+            _ = item.folder_name
+        except AttributeError:
+            item.folder_name = item.title
+        items_by_title[item.folder_name] = item
 
     # create orphan root dir
     orphan_root_dir = os.path.join(cleandir, ORPHAN_DIR_NAME)
@@ -2668,6 +2894,7 @@ def cmd_clean(cleandir, dryrun):
         info('total size of newly orphaned files: {}'.format(pretty_size(total_size)))
         if not dryrun:
             info('orphaned items moved to: {}'.format(orphan_root_dir))
+            save_manifest(items)
     else:
         info('nothing to clean. nice and tidy!')
         
@@ -2741,7 +2968,7 @@ def main(args):
             time.sleep(args.wait * 60 * 60)                
         if not args.installers:
             args.installers = "standalone"
-        cmd_update(args.os, args.lang, args.skipknown, args.updateonly, not args.full, args.ids, args.skipids,args.skiphidden,args.installers,args.resumemode,args.strictverify)
+        cmd_update(args.os, args.lang, args.skipknown, args.updateonly, not args.full, args.ids, args.skipids,args.skiphidden,args.installers,args.resumemode,args.strictverify,args.strictdupe)
     elif args.command == 'download':
         if (args.id):
             args.ids = [args.id]
